@@ -1,0 +1,6 @@
+/.venv
+*.tsv
+data/*.tsv
+data/CogNet-v2.0.*
+/core/__pycache__
+/__pycache__
