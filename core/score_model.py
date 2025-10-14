@@ -6,7 +6,7 @@ import logging
 from typing import List, Dict, Optional
 from datetime import datetime
 import wordfreq
-from .constants import FREQ_WEIGHT, COGNATE_WEIGHT, MAX_ZIPF
+from .constants import COGNATE_WEIGHT, MIN_ZIPF, MAX_ZIPF
 from .tokenizer import tokenizer, ISO_TO_STANZA_MAPPING
 from .cognate_lookup import cognate_loader
 
@@ -32,11 +32,11 @@ class FamiliarityScorer:
         if zipf_score <= 0:
             return 0.0
         
-        # Clamp to MAX_ZIPF and normalize
-        clamped_score = min(zipf_score, MAX_ZIPF)
-        return clamped_score / MAX_ZIPF
+        # Clamp to MIN_ZIPF and MAX_ZIPF range and normalize
+        clamped_score = max(min(zipf_score, MAX_ZIPF), MIN_ZIPF)
+        return (clamped_score - MIN_ZIPF) / (MAX_ZIPF - MIN_ZIPF)
     
-    def get_frequency_score(self, word: str, language: str) -> float:
+    def get_frequency_score(self, word: str, language: str) -> tuple[float, float]:
         """
         Get normalized frequency score for a word.
         
@@ -45,14 +45,14 @@ class FamiliarityScorer:
             language: 3-letter ISO language code
             
         Returns:
-            Normalized frequency score between 0 and 1
+            Tuple of (normalized frequency score, raw zipf score)
         """
         # Convert 3-letter ISO code to 2-letter for wordfreq
         wordfreq_lang = ISO_TO_STANZA_MAPPING.get(language, language)
         zipf_score = wordfreq.zipf_frequency(word, wordfreq_lang)
         normalized = self.normalize_frequency(zipf_score)
         logger.debug("Word '%s' (%s): zipf=%.3f, normalized=%.3f", word, wordfreq_lang, zipf_score, normalized)
-        return normalized
+        return normalized, zipf_score
     
     def has_cognate(self, word: str, learning_lang: str, native_lang: str) -> bool:
         """
@@ -88,10 +88,10 @@ class FamiliarityScorer:
                     original_text, token_info.get('pos', 'unknown'), word)
         
         # Get frequency score using the word directly
-        freq_score = self.get_frequency_score(word, learning_lang)
+        freq_score, zipf_score = self.get_frequency_score(word, learning_lang)
         
-        # Compute base familiarity score
-        base_familiarity = FREQ_WEIGHT * freq_score
+        # Compute base familiarity score (use full frequency score, no 0.8 weighting)
+        base_familiarity = freq_score
         
         # Prepare result
         result = {
@@ -100,15 +100,19 @@ class FamiliarityScorer:
         }
         
         # Check for cognates and add boosted score if found
-        cognates = cognate_loader.find_cognates_for_word(word, learning_lang, native_lang)
+        stanza_pos = token_info.get('pos')  # Get POS from Stanza tokenization
+        cognates = cognate_loader.find_cognates_for_word(word, learning_lang, native_lang, stanza_pos)
         if len(cognates) > 0:
-            cognate_boost = 1.0  # Full boost for confirmed cognates
-            cognate_familiarity = FREQ_WEIGHT * freq_score + COGNATE_WEIGHT * cognate_boost
+            cognate_familiarity = min(base_familiarity + COGNATE_WEIGHT, 1.0)
             result['cognate_familiarity_score'] = round(cognate_familiarity, 3)
             result['cognate'] = cognates[0]  # Use the first (typically only) cognate found
+            logger.info("Token '%s' [POS:%s]: zipf=%.3f, base_score=%.3f, cognate_score=%.3f (cognate: %s)", 
+                        original_text, stanza_pos or 'unknown', zipf_score, result['familiarity_score'], result['cognate_familiarity_score'], cognates[0])
             logger.info("Token '%s' has cognate '%s' - boosted score: %.3f -> %.3f", 
                        original_text, cognates[0], result['familiarity_score'], result['cognate_familiarity_score'])
         else:
+            logger.info("Token '%s' [POS:%s]: zipf=%.3f, base_score=%.3f, cognate_score=None (no cognate)", 
+                        original_text, stanza_pos or 'unknown', zipf_score, result['familiarity_score'])
             logger.debug("Token '%s' - no cognate found, base score: %.3f", 
                         original_text, result['familiarity_score'])
         

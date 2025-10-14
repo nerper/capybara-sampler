@@ -3,11 +3,11 @@ Core constants and coefficients for the familiarity scoring system.
 """
 
 # Scoring weights
-FREQ_WEIGHT = 0.8
 COGNATE_WEIGHT = 0.2
 
 # Frequency normalization
-MAX_ZIPF = 7.0
+MIN_ZIPF = 2.3
+MAX_ZIPF = 7.7
 
 # API configuration
 API_VERSION = "1.0.0"
