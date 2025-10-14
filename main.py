@@ -3,6 +3,8 @@ FastAPI application for word familiarity scoring.
 """
 
 import logging
+import time
+from contextlib import asynccontextmanager
 from typing import Optional, List
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
@@ -36,27 +38,37 @@ class TokenScore(BaseModel):
         None, 
         description="Cognate-boosted familiarity score (0-1), present if cognates found"
     )
+    cognate: Optional[str] = Field(
+        None,
+        description="Cognate word in the native language, present if cognate found"
+    )
 
 
 class FamiliarityResponse(BaseModel):
     """Response model for familiarity scoring."""
     phrase: str = Field(..., description="The analyzed phrase")
-    language: str = Field(..., description="Language code of the phrase")
+    learning_language: str = Field(..., description="Learning language code of the phrase")
+    native_language: str = Field(..., description="Native language code used for cognate boosting")
     timestamp: str = Field(..., description="ISO timestamp of analysis")
     tokens: List[TokenScore] = Field(..., description="List of token scores")
 
 
-# Initialize FastAPI app
-app = FastAPI(
-    title="Word Familiarity API",
-    version=API_VERSION,
-    description="Computes per-token familiarity scores for phrases in target languages with cognate boosting"
-)
+class BatchFamiliarityRequest(BaseModel):
+    """Request model for batch familiarity scoring."""
+    requests: List[FamiliarityRequest] = Field(..., description="List of familiarity requests to process")
 
 
-@app.on_event("startup")
-async def startup_event():
-    """Preload datasets and models on startup."""
+class BatchFamiliarityResponse(BaseModel):
+    """Response model for batch familiarity scoring."""
+    responses: List[FamiliarityResponse] = Field(..., description="List of familiarity responses")
+    total_processed: int = Field(..., description="Total number of requests processed")
+    processing_time_ms: float = Field(..., description="Total processing time in milliseconds")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Lifespan event handler for startup and shutdown."""
+    # Startup
     logger.info("Starting API - preloading datasets and models...")
     
     # Preload all Stanza pipelines
@@ -76,6 +88,20 @@ async def startup_event():
         raise RuntimeError(f"Startup failed: Could not preload CogNet dataset - {str(e)}") from e
     
     logger.info("API startup complete - all models and datasets preloaded")
+    
+    yield
+    
+    # Shutdown (if needed)
+    logger.info("API shutdown")
+
+
+# Initialize FastAPI app
+app = FastAPI(
+    title="Word Familiarity API",
+    version=API_VERSION,
+    description="Computes per-token familiarity scores for phrases in target languages with cognate boosting",
+    lifespan=lifespan
+)
 
 
 @app.get("/")
@@ -86,7 +112,10 @@ async def root():
         "version": API_VERSION,
         "supported_languages": SUPPORTED_LANGUAGES,
         "endpoints": {
-            "familiarity": "/familiarity (POST)"
+            "familiarity": "/familiarity (POST)",
+            "batch_familiarity": "/familiarity-batch (POST)",
+            "languages": "/languages (GET)",
+            "health": "/health (GET)"
         }
     }
 
@@ -165,6 +194,92 @@ async def compute_familiarity(request: FamiliarityRequest):
         )
 
 
+@app.post("/familiarity-batch", response_model=BatchFamiliarityResponse)
+async def compute_familiarity_batch(batch_request: BatchFamiliarityRequest):
+    """
+    Compute familiarity scores for multiple phrases in batch.
+    
+    The endpoint processes a list of familiarity requests and returns responses for each.
+    All requests are processed sequentially with shared model loading for efficiency.
+    
+    Args:
+        batch_request: BatchFamiliarityRequest with list of familiarity requests
+        
+    Returns:
+        BatchFamiliarityResponse with list of responses and processing metadata
+        
+    Raises:
+        HTTPException: If any request has invalid parameters or processing fails
+    """
+    start_time = time.time()
+    logger.info("Received batch familiarity request with %d phrases", len(batch_request.requests))
+    
+    if not batch_request.requests:
+        raise HTTPException(
+            status_code=400,
+            detail="Batch request cannot be empty"
+        )
+    
+    responses = []
+    
+    try:
+        for i, request in enumerate(batch_request.requests):
+            logger.debug("Processing batch item %d/%d", i + 1, len(batch_request.requests))
+            
+            # Validate languages
+            if request.learning_language not in SUPPORTED_LANGUAGES:
+                logger.error(f"Unsupported learning language in batch item {i+1}: {request.learning_language}")
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Learning language '{request.learning_language}' in request {i+1} not supported. "
+                           f"Supported: {list(SUPPORTED_LANGUAGES.keys())}"
+                )
+            
+            if request.native_language not in SUPPORTED_LANGUAGES:
+                logger.error(f"Unsupported native language in batch item {i+1}: {request.native_language}")
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Native language '{request.native_language}' in request {i+1} not supported. "
+                           f"Supported: {list(SUPPORTED_LANGUAGES.keys())}"
+                )
+            
+            # Validate phrase
+            if not request.phrase.strip():
+                logger.error(f"Empty phrase in batch item {i+1}")
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Phrase in request {i+1} cannot be empty"
+                )
+            
+            # Compute familiarity scores
+            result = familiarity_scorer.compute_familiarity(
+                phrase=request.phrase,
+                learning_language=request.learning_language,
+                native_language=request.native_language
+            )
+            
+            responses.append(FamiliarityResponse(**result))
+        
+        processing_time_ms = (time.time() - start_time) * 1000
+        logger.info("Batch processing complete - %d requests processed in %.2f ms", 
+                   len(responses), processing_time_ms)
+        
+        return BatchFamiliarityResponse(
+            responses=responses,
+            total_processed=len(responses),
+            processing_time_ms=round(processing_time_ms, 2)
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Unexpected error processing batch request: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Internal server error during batch processing: {str(e)}"
+        )
+
+
 @app.get("/languages")
 async def get_supported_languages():
     """Get list of supported languages."""
@@ -175,4 +290,4 @@ async def get_supported_languages():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)

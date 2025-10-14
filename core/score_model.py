@@ -6,7 +6,7 @@ import logging
 from typing import List, Dict, Optional
 from datetime import datetime
 import wordfreq
-from .constants import FREQ_WEIGHT, COGNATE_WEIGHT, MAX_ZIPF, DEFAULT_NATIVE_LANGUAGE
+from .constants import FREQ_WEIGHT, COGNATE_WEIGHT, MAX_ZIPF
 from .tokenizer import tokenizer, ISO_TO_STANZA_MAPPING
 from .cognate_lookup import cognate_loader
 
@@ -81,10 +81,11 @@ class FamiliarityScorer:
         Returns:
             Dictionary with token and computed scores
         """
-        word = token_info['text'].lower()
+        original_text = token_info['text']
+        word = original_text.lower()
         
-        logger.debug("Processing token: '%s' (pos: %s)", 
-                    token_info['text'], token_info.get('pos', 'unknown'))
+        logger.debug("Processing token: '%s' (pos: %s) -> word: '%s'", 
+                    original_text, token_info.get('pos', 'unknown'), word)
         
         # Get frequency score using the word directly
         freq_score = self.get_frequency_score(word, learning_lang)
@@ -94,27 +95,27 @@ class FamiliarityScorer:
         
         # Prepare result
         result = {
-            'text': token_info['text'],
+            'text': original_text,  # Use original text to preserve case
             'familiarity_score': round(base_familiarity, 3)
         }
         
         # Check for cognates and add boosted score if found
-        # Check for cognates
-        has_cognate = self.has_cognate(word, learning_lang, native_lang)
-        if has_cognate:
+        cognates = cognate_loader.find_cognates_for_word(word, learning_lang, native_lang)
+        if len(cognates) > 0:
             cognate_boost = 1.0  # Full boost for confirmed cognates
             cognate_familiarity = FREQ_WEIGHT * freq_score + COGNATE_WEIGHT * cognate_boost
             result['cognate_familiarity_score'] = round(cognate_familiarity, 3)
-            logger.info("Token '%s' has cognate - boosted score: %.3f -> %.3f", 
-                       token_info['text'], result['familiarity_score'], result['cognate_familiarity_score'])
+            result['cognate'] = cognates[0]  # Use the first (typically only) cognate found
+            logger.info("Token '%s' has cognate '%s' - boosted score: %.3f -> %.3f", 
+                       original_text, cognates[0], result['familiarity_score'], result['cognate_familiarity_score'])
         else:
             logger.debug("Token '%s' - no cognate found, base score: %.3f", 
-                        token_info['text'], result['familiarity_score'])
+                        original_text, result['familiarity_score'])
         
         return result
     
     def compute_familiarity(self, phrase: str, learning_language: str, 
-                          native_language: str = DEFAULT_NATIVE_LANGUAGE) -> dict:
+                          native_language: str) -> dict:
         """
         Compute familiarity scores for all tokens in a phrase.
         
@@ -149,7 +150,8 @@ class FamiliarityScorer:
         # Prepare response
         result = {
             'phrase': phrase,
-            'language': learning_language,
+            'learning_language': learning_language,
+            'native_language': native_language,
             'timestamp': datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ'),
             'tokens': scored_tokens
         }

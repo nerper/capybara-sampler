@@ -89,14 +89,25 @@ class CognateLoader:
         
         try:
             logger.info("Loading CogNet dataset from %s", self.tsv_path)
-            self._full_dataset = pl.read_csv(
+            dataset = pl.read_csv(
                 self.tsv_path,
                 separator="\t",
                 has_header=True,
                 ignore_errors=True,
                 truncate_ragged_lines=True
             )
-            logger.info("Loaded %d cognate pairs from CogNet dataset", len(self._full_dataset))
+            logger.info("Loaded %d cognate pairs from CogNet dataset", len(dataset))
+            
+            # Filter out words shorter than 3 characters
+            original_count = len(dataset)
+            self._full_dataset = dataset.filter(
+                (pl.col("word 1").str.lengths() >= 3) & 
+                (pl.col("word 2").str.lengths() >= 3)
+            )
+            filtered_count = len(self._full_dataset)
+            logger.info("Filtered CogNet dataset: %d -> %d pairs (removed %d pairs with words < 3 chars)", 
+                       original_count, filtered_count, original_count - filtered_count)
+            
             return self._full_dataset
             
         except Exception as e:

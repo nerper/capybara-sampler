@@ -14,11 +14,7 @@ API_VERSION = "1.0.0"
 
 # Language codes
 SUPPORTED_LANGUAGES = {
-    "ita": "Italian",
-    "eng": "English", 
+    "eng": "English",
+    "ita": "Italian", 
     "spa": "Spanish",
-    "fra": "French",
 }
-
-# Default values
-DEFAULT_NATIVE_LANGUAGE = "eng"
