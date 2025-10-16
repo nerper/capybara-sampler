@@ -10,40 +10,16 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
+from core.constants import API_VERSION, SUPPORTED_LANGUAGES
+from core.score_model import familiarity_scorer
+from core.tokenizer import tokenizer
 
-# Configure detailed logging with timing info
+# Configure logging
 logging.basicConfig(
-    level=logging.DEBUG,  # More verbose logging
-    format='%(asctime)s.%(msecs)03d - %(name)s - %(levelname)s - [TIMING] %(message)s',
-    datefmt='%H:%M:%S'
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
-
-# Track overall startup timing
-STARTUP_START_TIME = time.time()
-logger.info("=== APPLICATION STARTUP BEGAN ===")
-
-# Time each import step
-logger.info("Starting imports...")
-import_start = time.time()
-
-logger.info("Importing core.constants...")
-constants_start = time.time()
-from core.constants import API_VERSION, SUPPORTED_LANGUAGES
-logger.info("core.constants imported in %.3f seconds", time.time() - constants_start)
-
-logger.info("Importing core.score_model...")
-score_model_start = time.time()
-from core.score_model import familiarity_scorer
-logger.info("core.score_model imported in %.3f seconds", time.time() - score_model_start)
-
-logger.info("Importing core.tokenizer...")
-tokenizer_start = time.time()
-from core.tokenizer import tokenizer
-logger.info("core.tokenizer imported in %.3f seconds", time.time() - tokenizer_start)
-
-total_import_time = time.time() - import_start
-logger.info("All imports completed in %.3f seconds", total_import_time)
 
 
 class FamiliarityRequest(BaseModel):
@@ -94,30 +70,18 @@ class BatchFamiliarityResponse(BaseModel):
 async def lifespan(app: FastAPI):
     """Lifespan event handler for startup and shutdown."""
     # Startup
-    lifespan_start = time.time()
-    logger.info("=== LIFESPAN STARTUP PHASE BEGAN ===")
     logger.info("Starting API - preloading datasets and models...")
     
-    # Preload all Stanza pipelines with detailed timing
-    preload_start = time.time()
-    logger.info("Beginning Stanza pipeline preloading...")
-    
+    # Preload all Stanza pipelines
     try:
         tokenizer.preload_all_pipelines()
-        
-        preload_duration = time.time() - preload_start
-        logger.info("Successfully preloaded all Stanza pipelines in %.3f seconds", preload_duration)
-        
+        logger.info("Successfully preloaded all Stanza pipelines")
     except Exception as e:
-        preload_duration = time.time() - preload_start
-        logger.error("Failed to preload Stanza pipelines after %.3f seconds: %s", preload_duration, str(e))
+        logger.error("Failed to preload Stanza pipelines: %s", str(e))
         raise RuntimeError(f"Startup failed: Could not preload Stanza pipelines - {str(e)}") from e
     
-    # Test OpenAI connectivity with timing
-    openai_test_start = time.time()
-    logger.info("Testing OpenAI API connectivity...")
+    # Test OpenAI connectivity
     try:
-        # Import and test the OpenAI detector
         from core.openai_cognate_detector import openai_cognate_detector
         
         if openai_cognate_detector.client is None:
@@ -125,42 +89,24 @@ async def lifespan(app: FastAPI):
         else:
             logger.info("OpenAI client ready for cognate detection")
             
-        openai_test_duration = time.time() - openai_test_start
-        logger.info("OpenAI connectivity test completed in %.3f seconds", openai_test_duration)
-        
     except Exception as e:
-        openai_test_duration = time.time() - openai_test_start
-        logger.error("OpenAI initialization test failed after %.3f seconds: %s", openai_test_duration, str(e))
+        logger.error("OpenAI initialization failed: %s", str(e))
     
-    total_lifespan_duration = time.time() - lifespan_start
-    total_startup_duration = time.time() - STARTUP_START_TIME
-    
-    logger.info("=== API STARTUP COMPLETE ===")
-    logger.info("Lifespan phase duration: %.3f seconds", total_lifespan_duration)
-    logger.info("Total application startup duration: %.3f seconds", total_startup_duration)
-    logger.info("API is ready to handle requests")
+    logger.info("API startup complete - all models preloaded")
     
     yield
     
     # Shutdown (if needed)
-    shutdown_start = time.time()
-    logger.info("=== API SHUTDOWN INITIATED ===")
-    logger.info("API shutdown completed in %.3f seconds", time.time() - shutdown_start)
+    logger.info("API shutdown")
 
 
 # Initialize FastAPI app
-logger.info("Creating FastAPI application...")
-app_creation_start = time.time()
-
 app = FastAPI(
     title="Word Familiarity API",
     version=API_VERSION,
     description="Computes per-token familiarity scores for phrases in target languages with cognate boosting",
     lifespan=lifespan
 )
-
-app_creation_time = time.time() - app_creation_start
-logger.info("FastAPI application created in %.3f seconds", app_creation_time)
 
 
 @app.get("/")
@@ -363,17 +309,28 @@ async def get_supported_languages():
 
 
 if __name__ == "__main__":
-    logger.info("=== STARTING UVICORN SERVER ===")
-    uvicorn_start = time.time()
-    
     import uvicorn
+    import os
     
-    logger.info("Starting uvicorn server on http://0.0.0.0:8000 with reload=True")
-    logger.info("Application startup phase complete - %.3f seconds elapsed", 
-               time.time() - STARTUP_START_TIME)
+    # Check for development mode from environment variable
+    dev_mode = os.getenv('DEV_MODE', 'false').lower() == 'true'
     
-    uvicorn.run(
-        "main:app", 
-        host="0.0.0.0", 
-        port=8000
-    )
+    if dev_mode:
+        logger.info("Starting uvicorn server in DEVELOPMENT mode with hot reload")
+        uvicorn.run(
+            "main:app", 
+            host="0.0.0.0", 
+            port=8000, 
+            reload=True,
+            # More targeted reload settings to avoid performance issues
+            reload_dirs=[".", "core"],
+            reload_delay=0.25
+        )
+    else:
+        logger.info("Starting uvicorn server in PRODUCTION mode (no reload)")
+        uvicorn.run(
+            "main:app", 
+            host="0.0.0.0", 
+            port=8000, 
+            reload=False
+        )

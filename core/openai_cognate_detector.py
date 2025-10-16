@@ -5,22 +5,11 @@ OpenAI-based cognate detection for intelligent language analysis.
 import logging
 import json
 import os
-import time
 from typing import List, Dict, Optional
 import openai
 from openai import OpenAI
 
-# Configure detailed logging
 logger = logging.getLogger(__name__)
-
-# Track module loading time
-MODULE_LOAD_START = time.time()
-logger.debug("Loading OpenAI cognate detector module...")
-
-# Time the OpenAI import
-openai_import_start = time.time()
-logger.debug("Importing OpenAI library...")
-logger.debug("OpenAI library imported in %.3f seconds", time.time() - openai_import_start)
 
 # Valid POS tags for cognate detection
 VALID_POS_TAGS = {'NOUN', 'VERB', 'ADJ', 'ADV'}
@@ -32,39 +21,21 @@ class OpenAICognateDetector:
     """Handles cognate detection using OpenAI API."""
     
     def __init__(self):
-        init_start = time.time()
-        logger.debug("Initializing OpenAI cognate detector...")
-        
         self.client = None
         self._initialize_client()
-        
-        init_time = time.time() - init_start
-        logger.debug("OpenAI cognate detector initialized in %.3f seconds", init_time)
     
     def _initialize_client(self):
         """Initialize OpenAI client with API key from environment."""
-        client_init_start = time.time()
-        logger.debug("Checking for OpenAI API key in environment...")
-        
         api_key = os.getenv('OPENAI_API_KEY')
         if not api_key:
-            logger.warning("OPENAI_API_KEY not found in environment variables - cognate detection will be disabled")
+            logger.warning("OPENAI_API_KEY not found in environment variables")
             return
         
-        logger.debug("OpenAI API key found, creating client...")
-        
         try:
-            client_creation_start = time.time()
             self.client = OpenAI(api_key=api_key)
-            client_creation_time = time.time() - client_creation_start
-            
-            total_init_time = time.time() - client_init_start
-            logger.info("✓ OpenAI client initialized successfully in %.3f seconds (%.3f for creation)", 
-                       total_init_time, client_creation_time)
-            
+            logger.info("OpenAI client initialized successfully")
         except Exception as e:
-            init_time = time.time() - client_init_start
-            logger.error("✗ Failed to initialize OpenAI client after %.3f seconds: %s", init_time, str(e))
+            logger.error("Failed to initialize OpenAI client: %s", str(e))
     
     def _filter_tokens_by_pos(self, tokens: List[Dict]) -> List[Dict]:
         """Filter tokens to only include valid POS tags for cognate detection."""
@@ -223,11 +194,4 @@ class OpenAICognateDetector:
 
 
 # Global detector instance  
-logger.debug("Creating global OpenAI cognate detector instance...")
-detector_creation_start = time.time()
 openai_cognate_detector = OpenAICognateDetector()
-detector_creation_time = time.time() - detector_creation_start
-
-total_module_time = time.time() - MODULE_LOAD_START
-logger.debug("OpenAI cognate detector module loaded completely in %.3f seconds (%.3f for detector creation)", 
-            total_module_time, detector_creation_time)

@@ -3,37 +3,14 @@ Core scoring model for computing familiarity scores with frequency and cognate b
 """
 
 import logging
-import time
 from typing import List, Dict, Optional
 from datetime import datetime
-
-# Configure detailed logging
-logger = logging.getLogger(__name__)
-
-# Track module loading time
-MODULE_LOAD_START = time.time()
-logger.debug("Loading score model module...")
-
-# Time each import
-logger.debug("Importing wordfreq...")
-wordfreq_import_start = time.time()
 import wordfreq
-logger.debug("wordfreq imported in %.3f seconds", time.time() - wordfreq_import_start)
-
-logger.debug("Importing constants...")
-constants_import_start = time.time()
 from .constants import COGNATE_WEIGHT, MIN_ZIPF, MAX_ZIPF
-logger.debug("constants imported in %.3f seconds", time.time() - constants_import_start)
-
-logger.debug("Importing tokenizer...")
-tokenizer_import_start = time.time()
 from .tokenizer import tokenizer, ISO_TO_STANZA_MAPPING
-logger.debug("tokenizer imported in %.3f seconds", time.time() - tokenizer_import_start)
-
-logger.debug("Importing OpenAI cognate detector...")
-cognate_import_start = time.time()
 from .openai_cognate_detector import openai_cognate_detector
-logger.debug("OpenAI cognate detector imported in %.3f seconds", time.time() - cognate_import_start)
+
+logger = logging.getLogger(__name__)
 
 
 class FamiliarityScorer:
@@ -155,25 +132,15 @@ class FamiliarityScorer:
         Returns:
             Dictionary with phrase analysis and token scores
         """
-        compute_start = time.time()
-        logger.info("=== STARTING FAMILIARITY COMPUTATION ===")
-        logger.info("Starting familiarity computation for '%s' (%s -> %s)", 
-                   phrase, learning_language, native_language)
+        logger.info("Starting familiarity computation for %s -> %s", learning_language, native_language)
         
         # Tokenize the phrase
-        tokenize_start = time.time()
-        logger.info("Starting tokenization...")
         tokens = tokenizer.tokenize(phrase, learning_language)
-        tokenize_time = time.time() - tokenize_start
-        logger.info("Tokenization complete - processing %d tokens in %.3f seconds", 
-                   len(tokens), tokenize_time)
+        logger.info("Tokenization complete - processing %d tokens", len(tokens))
         
         # Get cognate information for all tokens using OpenAI
         cognate_map = {}
-        cognate_start = time.time()
-        
         try:
-            logger.info("=== COGNATE DETECTION PHASE ===")
             logger.info("Calling OpenAI for cognate detection...")
             
             # Get cognate detection for the full phrase
@@ -184,14 +151,9 @@ class FamiliarityScorer:
                 "tokens": tokens
             }
             
-            openai_call_start = time.time()
             cognate_results = openai_cognate_detector.detect_cognates_batch([request])
-            openai_call_time = time.time() - openai_call_start
-            
-            logger.info("OpenAI call completed in %.3f seconds", openai_call_time)
             
             # Process results and create cognate map
-            result_processing_start = time.time()
             if cognate_results.get("results"):
                 result_tokens = cognate_results["results"][0].get("tokens", [])
                 for token_result in result_tokens:
@@ -217,30 +179,16 @@ class FamiliarityScorer:
                             'cognate_word': None
                         }
             
-            result_processing_time = time.time() - result_processing_start
-            logger.info("Cognate result processing completed in %.3f seconds", result_processing_time)
-            
         except Exception as e:
-            cognate_error_time = time.time() - cognate_start
-            logger.error("Error calling OpenAI for cognate detection after %.3f seconds: %s", 
-                        cognate_error_time, str(e))
+            logger.error("Error calling OpenAI for cognate detection: %s", str(e))
             cognate_map = {}
         
-        cognate_total_time = time.time() - cognate_start
-        logger.info("=== COGNATE DETECTION COMPLETE ===")
-        logger.info("Total cognate detection time: %.3f seconds", cognate_total_time)
-        
         # Compute scores for each token with cognate information
-        scoring_start = time.time()
-        logger.info("=== TOKEN SCORING PHASE ===")
-        logger.info("Starting token scoring for %d tokens...", len(tokens))
-        
         scored_tokens = []
         cognate_count = 0
         
         for i, token_info in enumerate(tokens):
-            token_start = time.time()
-            logger.debug("Processing token %d/%d: '%s'", i + 1, len(tokens), token_info.get('text', ''))
+            logger.debug("Processing token %d/%d", i + 1, len(tokens))
             
             # Get cognate info for this token
             token_text = token_info['text'].lower()
@@ -263,17 +211,10 @@ class FamiliarityScorer:
             
             if 'cognate_familiarity_score' in token_scores:
                 cognate_count += 1
-            
-            token_time = time.time() - token_start
-            logger.debug("Token '%s' scored in %.3f seconds", token_info.get('text', ''), token_time)
         
-        scoring_time = time.time() - scoring_start
-        logger.info("=== TOKEN SCORING COMPLETE ===")
-        logger.info("Scoring complete - %d tokens processed in %.3f seconds, %d cognates found", 
-                   len(tokens), scoring_time, cognate_count)
+        logger.info("Scoring complete - %d tokens processed, %d cognates found", len(tokens), cognate_count)
         
         # Prepare response
-        response_start = time.time()
         result = {
             'phrase': phrase,
             'learning_language': learning_language,
@@ -281,23 +222,9 @@ class FamiliarityScorer:
             'timestamp': datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ'),
             'tokens': scored_tokens
         }
-        response_time = time.time() - response_start
-        
-        total_compute_time = time.time() - compute_start
-        logger.info("=== FAMILIARITY COMPUTATION COMPLETE ===")
-        logger.info("Response prepared in %.3f seconds", response_time)
-        logger.info("TOTAL computation time: %.3f seconds (tokenize: %.3f, cognate: %.3f, scoring: %.3f)", 
-                   total_compute_time, tokenize_time, cognate_total_time, scoring_time)
         
         return result
 
 
 # Global scorer instance
-logger.debug("Creating global familiarity scorer instance...")
-scorer_creation_start = time.time()
 familiarity_scorer = FamiliarityScorer()
-scorer_creation_time = time.time() - scorer_creation_start
-
-total_module_time = time.time() - MODULE_LOAD_START
-logger.debug("Score model module loaded completely in %.3f seconds (%.3f for scorer creation)", 
-            total_module_time, scorer_creation_time)
