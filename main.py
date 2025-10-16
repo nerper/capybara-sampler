@@ -6,19 +6,44 @@ import logging
 import time
 from contextlib import asynccontextmanager
 from typing import Optional, List
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
-from core.constants import API_VERSION, SUPPORTED_LANGUAGES
-from core.score_model import familiarity_scorer
-from core.cognate_lookup import cognate_loader
-from core.tokenizer import tokenizer
 
-# Configure logging
+# Configure detailed logging with timing info
 logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    level=logging.DEBUG,  # More verbose logging
+    format='%(asctime)s.%(msecs)03d - %(name)s - %(levelname)s - [TIMING] %(message)s',
+    datefmt='%H:%M:%S'
 )
 logger = logging.getLogger(__name__)
+
+# Track overall startup timing
+STARTUP_START_TIME = time.time()
+logger.info("=== APPLICATION STARTUP BEGAN ===")
+
+# Time each import step
+logger.info("Starting imports...")
+import_start = time.time()
+
+logger.info("Importing core.constants...")
+constants_start = time.time()
+from core.constants import API_VERSION, SUPPORTED_LANGUAGES
+logger.info("core.constants imported in %.3f seconds", time.time() - constants_start)
+
+logger.info("Importing core.score_model...")
+score_model_start = time.time()
+from core.score_model import familiarity_scorer
+logger.info("core.score_model imported in %.3f seconds", time.time() - score_model_start)
+
+logger.info("Importing core.tokenizer...")
+tokenizer_start = time.time()
+from core.tokenizer import tokenizer
+logger.info("core.tokenizer imported in %.3f seconds", time.time() - tokenizer_start)
+
+total_import_time = time.time() - import_start
+logger.info("All imports completed in %.3f seconds", total_import_time)
 
 
 class FamiliarityRequest(BaseModel):
@@ -69,39 +94,73 @@ class BatchFamiliarityResponse(BaseModel):
 async def lifespan(app: FastAPI):
     """Lifespan event handler for startup and shutdown."""
     # Startup
+    lifespan_start = time.time()
+    logger.info("=== LIFESPAN STARTUP PHASE BEGAN ===")
     logger.info("Starting API - preloading datasets and models...")
     
-    # Preload all Stanza pipelines
+    # Preload all Stanza pipelines with detailed timing
+    preload_start = time.time()
+    logger.info("Beginning Stanza pipeline preloading...")
+    
     try:
         tokenizer.preload_all_pipelines()
-        logger.info("Successfully preloaded all Stanza pipelines")
+        
+        preload_duration = time.time() - preload_start
+        logger.info("Successfully preloaded all Stanza pipelines in %.3f seconds", preload_duration)
+        
     except Exception as e:
-        logger.error("Failed to preload Stanza pipelines: %s", str(e))
+        preload_duration = time.time() - preload_start
+        logger.error("Failed to preload Stanza pipelines after %.3f seconds: %s", preload_duration, str(e))
         raise RuntimeError(f"Startup failed: Could not preload Stanza pipelines - {str(e)}") from e
     
-    # Preload the CogNet dataset
+    # Test OpenAI connectivity with timing
+    openai_test_start = time.time()
+    logger.info("Testing OpenAI API connectivity...")
     try:
-        cognate_loader.preload_dataset()
-        logger.info("Successfully preloaded CogNet dataset")
+        # Import and test the OpenAI detector
+        from core.openai_cognate_detector import openai_cognate_detector
+        
+        if openai_cognate_detector.client is None:
+            logger.warning("OpenAI client not initialized - cognate detection will be disabled")
+        else:
+            logger.info("OpenAI client ready for cognate detection")
+            
+        openai_test_duration = time.time() - openai_test_start
+        logger.info("OpenAI connectivity test completed in %.3f seconds", openai_test_duration)
+        
     except Exception as e:
-        logger.error("Failed to preload CogNet dataset: %s", str(e))
-        raise RuntimeError(f"Startup failed: Could not preload CogNet dataset - {str(e)}") from e
+        openai_test_duration = time.time() - openai_test_start
+        logger.error("OpenAI initialization test failed after %.3f seconds: %s", openai_test_duration, str(e))
     
-    logger.info("API startup complete - all models and datasets preloaded")
+    total_lifespan_duration = time.time() - lifespan_start
+    total_startup_duration = time.time() - STARTUP_START_TIME
+    
+    logger.info("=== API STARTUP COMPLETE ===")
+    logger.info("Lifespan phase duration: %.3f seconds", total_lifespan_duration)
+    logger.info("Total application startup duration: %.3f seconds", total_startup_duration)
+    logger.info("API is ready to handle requests")
     
     yield
     
     # Shutdown (if needed)
-    logger.info("API shutdown")
+    shutdown_start = time.time()
+    logger.info("=== API SHUTDOWN INITIATED ===")
+    logger.info("API shutdown completed in %.3f seconds", time.time() - shutdown_start)
 
 
 # Initialize FastAPI app
+logger.info("Creating FastAPI application...")
+app_creation_start = time.time()
+
 app = FastAPI(
     title="Word Familiarity API",
     version=API_VERSION,
     description="Computes per-token familiarity scores for phrases in target languages with cognate boosting",
     lifespan=lifespan
 )
+
+app_creation_time = time.time() - app_creation_start
+logger.info("FastAPI application created in %.3f seconds", app_creation_time)
 
 
 @app.get("/")
@@ -222,46 +281,61 @@ async def compute_familiarity_batch(batch_request: BatchFamiliarityRequest):
     
     responses = []
     
-    try:
-        for i, request in enumerate(batch_request.requests):
-            logger.debug("Processing batch item %d/%d", i + 1, len(batch_request.requests))
-            
-            # Validate languages
-            if request.learning_language not in SUPPORTED_LANGUAGES:
-                logger.error(f"Unsupported learning language in batch item {i+1}: {request.learning_language}")
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Learning language '{request.learning_language}' in request {i+1} not supported. "
-                           f"Supported: {list(SUPPORTED_LANGUAGES.keys())}"
-                )
-            
-            if request.native_language not in SUPPORTED_LANGUAGES:
-                logger.error(f"Unsupported native language in batch item {i+1}: {request.native_language}")
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Native language '{request.native_language}' in request {i+1} not supported. "
-                           f"Supported: {list(SUPPORTED_LANGUAGES.keys())}"
-                )
-            
-            # Validate phrase
-            if not request.phrase.strip():
-                logger.error(f"Empty phrase in batch item {i+1}")
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Phrase in request {i+1} cannot be empty"
-                )
-            
-            # Compute familiarity scores
-            result = familiarity_scorer.compute_familiarity(
-                phrase=request.phrase,
-                learning_language=request.learning_language,
-                native_language=request.native_language
+    # Create a thread pool executor for concurrent processing
+    async def process_single_request(request: FamiliarityRequest, index: int) -> FamiliarityResponse:
+        """Process a single familiarity request."""
+        logger.debug("Processing batch item %d/%d", index + 1, len(batch_request.requests))
+        
+        # Validate languages
+        if request.learning_language not in SUPPORTED_LANGUAGES:
+            logger.error(f"Unsupported learning language in batch item {index+1}: {request.learning_language}")
+            raise HTTPException(
+                status_code=400,
+                detail=f"Learning language '{request.learning_language}' in request {index+1} not supported. "
+                       f"Supported: {list(SUPPORTED_LANGUAGES.keys())}"
             )
-            
-            responses.append(FamiliarityResponse(**result))
+        
+        if request.native_language not in SUPPORTED_LANGUAGES:
+            logger.error(f"Unsupported native language in batch item {index+1}: {request.native_language}")
+            raise HTTPException(
+                status_code=400,
+                detail=f"Native language '{request.native_language}' in request {index+1} not supported. "
+                       f"Supported: {list(SUPPORTED_LANGUAGES.keys())}"
+            )
+        
+        # Validate phrase
+        if not request.phrase.strip():
+            logger.error(f"Empty phrase in batch item {index+1}")
+            raise HTTPException(
+                status_code=400,
+                detail=f"Phrase in request {index+1} cannot be empty"
+            )
+        
+        # Compute familiarity scores in thread pool (since it's CPU-bound)
+        loop = asyncio.get_event_loop()
+        with ThreadPoolExecutor() as executor:
+            result = await loop.run_in_executor(
+                executor,
+                familiarity_scorer.compute_familiarity,
+                request.phrase,
+                request.learning_language,
+                request.native_language
+            )
+        
+        return FamiliarityResponse(**result)
+    
+    try:
+        # Process all requests concurrently
+        tasks = [
+            process_single_request(request, i) 
+            for i, request in enumerate(batch_request.requests)
+        ]
+        
+        logger.info("Starting concurrent processing of %d requests", len(tasks))
+        responses = await asyncio.gather(*tasks)
         
         processing_time_ms = (time.time() - start_time) * 1000
-        logger.info("Batch processing complete - %d requests processed in %.2f ms", 
+        logger.info("Batch processing complete - %d requests processed concurrently in %.2f ms", 
                    len(responses), processing_time_ms)
         
         return BatchFamiliarityResponse(
@@ -289,5 +363,17 @@ async def get_supported_languages():
 
 
 if __name__ == "__main__":
+    logger.info("=== STARTING UVICORN SERVER ===")
+    uvicorn_start = time.time()
+    
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    
+    logger.info("Starting uvicorn server on http://0.0.0.0:8000 with reload=True")
+    logger.info("Application startup phase complete - %.3f seconds elapsed", 
+               time.time() - STARTUP_START_TIME)
+    
+    uvicorn.run(
+        "main:app", 
+        host="0.0.0.0", 
+        port=8000
+    )

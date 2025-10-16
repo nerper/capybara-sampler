@@ -2,6 +2,14 @@
 Core constants and coefficients for the familiarity scoring system.
 """
 
+import logging
+import time
+
+# Configure logging for constants
+logger = logging.getLogger(__name__)
+constants_load_start = time.time()
+logger.debug("Loading constants module...")
+
 # Scoring weights
 COGNATE_WEIGHT = 0.2
 
@@ -18,3 +26,6 @@ SUPPORTED_LANGUAGES = {
     "ita": "Italian", 
     "spa": "Spanish",
 }
+
+constants_load_time = time.time() - constants_load_start
+logger.debug("Constants module loaded in %.3f seconds", constants_load_time)
