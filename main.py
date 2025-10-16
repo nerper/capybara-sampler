@@ -3,11 +3,8 @@ FastAPI application for word familiarity scoring.
 """
 
 import logging
-import time
 from contextlib import asynccontextmanager
 from typing import Optional, List
-import asyncio
-from concurrent.futures import ThreadPoolExecutor
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 from core.constants import API_VERSION, SUPPORTED_LANGUAGES
@@ -24,11 +21,9 @@ logger = logging.getLogger(__name__)
 
 class FamiliarityRequest(BaseModel):
     """Request model for familiarity scoring."""
-    phrase: str = Field(..., description="The phrase to analyze for familiarity")
     learning_language: str = Field(..., description="Target language code (e.g., 'spa', 'ita', 'fra', 'eng')")
-    native_language: str = Field(
-        description="Native language code for cognate boosting"
-    )
+    native_language: str = Field(..., description="Native language code for cognate boosting")
+    content: str = Field(..., description="The text content to analyze for familiarity")
 
 
 class TokenScore(BaseModel):
@@ -45,25 +40,23 @@ class TokenScore(BaseModel):
     )
 
 
+class SentenceScore(BaseModel):
+    """Model for sentence-level scores."""
+    text: str = Field(..., description="The sentence text")
+    index: int = Field(..., description="The index of the sentence in the document")
+    translated_text: Optional[str] = Field(None, description="The translated sentence used for cognate detection")
+    tokens: List[TokenScore] = Field(..., description="List of token scores for this sentence")
+
+
 class FamiliarityResponse(BaseModel):
     """Response model for familiarity scoring."""
-    phrase: str = Field(..., description="The analyzed phrase")
-    learning_language: str = Field(..., description="Learning language code of the phrase")
+    content: str = Field(..., description="The analyzed content")
+    learning_language: str = Field(..., description="Learning language code of the content")
     native_language: str = Field(..., description="Native language code used for cognate boosting")
     timestamp: str = Field(..., description="ISO timestamp of analysis")
-    tokens: List[TokenScore] = Field(..., description="List of token scores")
+    sentences: List[SentenceScore] = Field(..., description="List of sentence scores")
+    total_tokens: int = Field(..., description="Total number of tokens across all sentences")
 
-
-class BatchFamiliarityRequest(BaseModel):
-    """Request model for batch familiarity scoring."""
-    requests: List[FamiliarityRequest] = Field(..., description="List of familiarity requests to process")
-
-
-class BatchFamiliarityResponse(BaseModel):
-    """Response model for batch familiarity scoring."""
-    responses: List[FamiliarityResponse] = Field(..., description="List of familiarity responses")
-    total_processed: int = Field(..., description="Total number of requests processed")
-    processing_time_ms: float = Field(..., description="Total processing time in milliseconds")
 
 
 @asynccontextmanager
@@ -117,8 +110,7 @@ async def root():
         "version": API_VERSION,
         "supported_languages": SUPPORTED_LANGUAGES,
         "endpoints": {
-            "familiarity": "/familiarity (POST)",
-            "batch_familiarity": "/familiarity-batch (POST)",
+            "familiarity": "/familiarity (POST) - Analyze content familiarity scores",
             "languages": "/languages (GET)",
             "health": "/health (GET)"
         }
@@ -134,17 +126,18 @@ async def health_check():
 @app.post("/familiarity", response_model=FamiliarityResponse)
 async def compute_familiarity(request: FamiliarityRequest):
     """
-    Compute familiarity scores for all tokens in a phrase.
+    Compute familiarity scores for all tokens in the content.
     
-    The endpoint analyzes each token in the phrase and returns:
+    The endpoint analyzes each token in each sentence and returns:
     - Base familiarity score based on word frequency
     - Cognate-boosted score if cognates are found with the native language
+    - Results organized by sentence structure
     
     Args:
-        request: FamiliarityRequest with phrase and language information
+        request: FamiliarityRequest with content and language information
         
     Returns:
-        FamiliarityResponse with detailed token scores
+        FamiliarityResponse with detailed sentence and token scores
         
     Raises:
         HTTPException: If language is not supported or processing fails
@@ -154,7 +147,7 @@ async def compute_familiarity(request: FamiliarityRequest):
     try:
         # Validate languages
         if request.learning_language not in SUPPORTED_LANGUAGES:
-            logger.error(f"Unsupported learning language: {request.learning_language}")
+            logger.error("Unsupported learning language: %s", request.learning_language)
             raise HTTPException(
                 status_code=400,
                 detail=f"Learning language '{request.learning_language}' not supported. "
@@ -162,142 +155,43 @@ async def compute_familiarity(request: FamiliarityRequest):
             )
         
         if request.native_language not in SUPPORTED_LANGUAGES:
-            logger.error(f"Unsupported native language: {request.native_language}")
+            logger.error("Unsupported native language: %s", request.native_language)
             raise HTTPException(
                 status_code=400,
                 detail=f"Native language '{request.native_language}' not supported. "
                        f"Supported: {list(SUPPORTED_LANGUAGES.keys())}"
             )
         
-        # Validate phrase
-        if not request.phrase.strip():
-            logger.error("Empty phrase provided")
+        # Validate content
+        if not request.content.strip():
+            logger.error("Empty content provided")
             raise HTTPException(
                 status_code=400,
-                detail="Phrase cannot be empty"
+                detail="Content cannot be empty"
             )
         
-        logger.info(f"Processing phrase with {len(request.phrase.split())} words")
+        logger.info("Processing content with %d words", len(request.content.split()))
         
-        # Compute familiarity scores
-        result = familiarity_scorer.compute_familiarity(
-            phrase=request.phrase,
+        # Compute familiarity scores for the content
+        result = familiarity_scorer.compute_document_familiarity(
+            document=request.content,
             learning_language=request.learning_language,
             native_language=request.native_language
         )
         
-        logger.info(f"Successfully processed {len(result['tokens'])} tokens")
+        logger.info("Successfully processed %d tokens in %d sentences", result['total_tokens'], len(result['sentences']))
         return FamiliarityResponse(**result)
         
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Unexpected error processing request: {str(e)}")
+        logger.error("Unexpected error processing request: %s", str(e))
         raise HTTPException(
             status_code=500,
             detail=f"Internal server error: {str(e)}"
-        )
+        ) from e
 
 
-@app.post("/familiarity-batch", response_model=BatchFamiliarityResponse)
-async def compute_familiarity_batch(batch_request: BatchFamiliarityRequest):
-    """
-    Compute familiarity scores for multiple phrases in batch.
-    
-    The endpoint processes a list of familiarity requests and returns responses for each.
-    All requests are processed sequentially with shared model loading for efficiency.
-    
-    Args:
-        batch_request: BatchFamiliarityRequest with list of familiarity requests
-        
-    Returns:
-        BatchFamiliarityResponse with list of responses and processing metadata
-        
-    Raises:
-        HTTPException: If any request has invalid parameters or processing fails
-    """
-    start_time = time.time()
-    logger.info("Received batch familiarity request with %d phrases", len(batch_request.requests))
-    
-    if not batch_request.requests:
-        raise HTTPException(
-            status_code=400,
-            detail="Batch request cannot be empty"
-        )
-    
-    responses = []
-    
-    # Create a thread pool executor for concurrent processing
-    async def process_single_request(request: FamiliarityRequest, index: int) -> FamiliarityResponse:
-        """Process a single familiarity request."""
-        logger.debug("Processing batch item %d/%d", index + 1, len(batch_request.requests))
-        
-        # Validate languages
-        if request.learning_language not in SUPPORTED_LANGUAGES:
-            logger.error(f"Unsupported learning language in batch item {index+1}: {request.learning_language}")
-            raise HTTPException(
-                status_code=400,
-                detail=f"Learning language '{request.learning_language}' in request {index+1} not supported. "
-                       f"Supported: {list(SUPPORTED_LANGUAGES.keys())}"
-            )
-        
-        if request.native_language not in SUPPORTED_LANGUAGES:
-            logger.error(f"Unsupported native language in batch item {index+1}: {request.native_language}")
-            raise HTTPException(
-                status_code=400,
-                detail=f"Native language '{request.native_language}' in request {index+1} not supported. "
-                       f"Supported: {list(SUPPORTED_LANGUAGES.keys())}"
-            )
-        
-        # Validate phrase
-        if not request.phrase.strip():
-            logger.error(f"Empty phrase in batch item {index+1}")
-            raise HTTPException(
-                status_code=400,
-                detail=f"Phrase in request {index+1} cannot be empty"
-            )
-        
-        # Compute familiarity scores in thread pool (since it's CPU-bound)
-        loop = asyncio.get_event_loop()
-        with ThreadPoolExecutor() as executor:
-            result = await loop.run_in_executor(
-                executor,
-                familiarity_scorer.compute_familiarity,
-                request.phrase,
-                request.learning_language,
-                request.native_language
-            )
-        
-        return FamiliarityResponse(**result)
-    
-    try:
-        # Process all requests concurrently
-        tasks = [
-            process_single_request(request, i) 
-            for i, request in enumerate(batch_request.requests)
-        ]
-        
-        logger.info("Starting concurrent processing of %d requests", len(tasks))
-        responses = await asyncio.gather(*tasks)
-        
-        processing_time_ms = (time.time() - start_time) * 1000
-        logger.info("Batch processing complete - %d requests processed concurrently in %.2f ms", 
-                   len(responses), processing_time_ms)
-        
-        return BatchFamiliarityResponse(
-            responses=responses,
-            total_processed=len(responses),
-            processing_time_ms=round(processing_time_ms, 2)
-        )
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Unexpected error processing batch request: {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Internal server error during batch processing: {str(e)}"
-        )
 
 
 @app.get("/languages")

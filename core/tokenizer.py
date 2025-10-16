@@ -69,6 +69,48 @@ class StanzaTokenizer:
         
         return self._pipelines[stanza_lang]
     
+    def tokenize_document(self, text: str, language: str) -> List[dict]:
+        """
+        Tokenize a document by first segmenting into sentences, then tokenizing each sentence.
+        
+        Args:
+            text: Input document text to tokenize
+            language: Language code (e.g., 'spa', 'eng')
+            
+        Returns:
+            List of dictionaries with sentence information including:
+            - text: the original sentence text
+            - index: index of the sentence in the document
+            - tokens: list of token dictionaries with text, lemma, pos
+        """
+        if language not in SUPPORTED_LANGUAGES:
+            logger.error("Unsupported language for tokenization: %s", language)
+            raise ValueError(f"Language '{language}' not supported. Supported languages: {list(SUPPORTED_LANGUAGES.keys())}")
+        
+        logger.info("Tokenizing document in language: %s", language)
+        pipeline = self._get_pipeline(language)
+        doc = pipeline(text)  # This returns a stanza.Document
+        
+        sentences_data = []
+        # doc.sentences is a list of stanza.Sentence objects
+        for sent_idx, sentence in enumerate(doc.sentences):  # type: ignore
+            tokens = []
+            for word in sentence.words:  # type: ignore
+                tokens.append({
+                    'text': word.text,  # type: ignore
+                    'pos': word.pos  # type: ignore
+                })
+            
+            sentences_data.append({
+                'text': sentence.text,  # type: ignore
+                'index': sent_idx,
+                'tokens': tokens
+            })
+        
+        total_tokens = sum(len(sent['tokens']) for sent in sentences_data)
+        logger.info("Tokenized document into %d sentences with %d total tokens", len(sentences_data), total_tokens)
+        return sentences_data
+
     def tokenize(self, text: str, language: str) -> List[dict]:
         """
         Tokenize text using Stanza and return token information.

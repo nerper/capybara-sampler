@@ -6,7 +6,6 @@ import logging
 import json
 import os
 from typing import List, Dict, Optional
-import openai
 from openai import OpenAI
 
 logger = logging.getLogger(__name__)
@@ -14,7 +13,27 @@ logger = logging.getLogger(__name__)
 # Valid POS tags for cognate detection
 VALID_POS_TAGS = {'NOUN', 'VERB', 'ADJ', 'ADV'}
 
-COGNATE_DETECTION_PROMPT = """Respond only with a valid JSON object following this schema: {"results":[{"learning_language":"<3-letter ISO code>","native_language":"<3-letter ISO code>","tokens":[{"text":"<token text>","cognate_status":"true_cognate"|"false_cognate"|null,"cognate":"<cognate word or null>"}]}]} Rules: 1) Translate the entire phrase from the learning language into the native language. 2) Compare each token in the original phrase with semantically equivalent words in the translation to detect cognates, ensuring context alignment (e.g., verb vs. adjective). 3) ONLY PROCESS AND RETURN RESULTS for tokens with POS: nouns, verbs, adjectives, and adverbs. Ignore all other tokens (pronouns, determiners, punctuation, etc.). 4) "cognate_status": "true_cognate" → valid POS and verified cognate in meaning and form; "false_cognate" → similar form but different meaning (false friend); null → no clear or verified relationship or no similarity. 5) "cognate": corresponding native word if "true_cognate" or "false_cognate", else null. 6) "learning_language" and "native_language" must match the input; return null if uncertain. 7) Return only JSON, no explanations. 8) Only include tokens with valid POS in the results array - omit all others."""
+COGNATE_DETECTION_PROMPT = """
+Respond with compact JSON. No markdown formatting.
+
+For each sentence:
+1. Translate from learning_language to native_language
+2. Find cognates for nouns, verbs, adjectives, adverbs only
+3. COGNATES MUST LOOK SIMILAR (same spelling/sound) - meaning alone is not enough
+4. "T" = true cognate (LOOKS similar AND same meaning), "F" = false cognate (LOOKS similar but different meaning), null = no visual similarity
+
+Examples of TRUE cognates: "hospital"↔"hospital", "animal"↔"animal", "chocolate"↔"chocolate"
+Examples of FALSE cognates: "embarrassed"↔"embarazada" (look similar, different meanings)
+Examples of NULL: "happy"↔"feliz", "went"↔"fui" (different appearance, even if same meaning)
+
+Format: [sentence_index, "translated_text", [[token, cognate_type, cognate_word], ...]]
+
+Example:
+
+INPUT: {"learning_language": "eng", "native_language": "spa", "content": "I am embarrassed. I went to school."}
+
+OUTPUT: [[0, "Estoy avergonzada.", [["I", null, null], ["am", null, null], ["embarrassed", "F", "embarazada"]]], [1, "Fui a la escuela.", [["I", null, null], ["went", null, null], ["to", null, null], ["school", "T", "escuela"]]]]
+"""
 
 
 class OpenAICognateDetector:
@@ -51,16 +70,163 @@ class OpenAICognateDetector:
         logger.info("Filtered %d tokens to %d with valid POS tags", len(tokens), len(filtered))
         return filtered
     
-    def detect_cognates_batch(self, requests: List[Dict]) -> Dict:
+    def detect_cognates_for_sentences(self, sentences_data: List[Dict], learning_lang: str, native_lang: str) -> Dict:
         """
-        Detect cognates for a batch of phrase requests using OpenAI API.
+        Detect cognates for multiple sentences using OpenAI API.
         
         Args:
-            requests: List of {"phrase": str, "learning_language": str, "native_language": str, "tokens": List[Dict]}
+            sentences_data: List of sentence dicts with 'text', 'index', and 'tokens'
+            learning_lang: Learning language code
+            native_lang: Native language code
         
         Returns:
-            Dictionary with cognate detection results
+            Dictionary with cognate detection results organized by sentence
         """
+        if not self.client:
+            logger.error("OpenAI client not initialized")
+            return {"results": []}
+        
+        # Prepare sentences with only valid POS tokens
+        processed_sentences = []
+        for sent_data in sentences_data:
+            filtered_tokens = self._filter_tokens_by_pos(sent_data.get('tokens', []))
+            
+            if not filtered_tokens:
+                logger.info("No valid tokens for cognate detection in sentence %d", sent_data['index'])
+                continue
+            
+            processed_sentences.append({
+                "index": sent_data['index'],
+                "text": sent_data['text'],
+                "learning_language": learning_lang,
+                "native_language": native_lang,
+                "valid_pos_tokens": [{"text": token["text"], "pos": token["pos"]} for token in filtered_tokens]
+            })
+        
+        if not processed_sentences:
+            logger.info("No sentences with valid tokens for OpenAI API")
+            return {"results": []}
+        
+        # Prepare the input for OpenAI
+        input_data = {
+            "learning_language": learning_lang,
+            "native_language": native_lang,
+            "sentences": [{
+                "index": sent["index"],
+                "text": sent["text"]
+            } for sent in processed_sentences]
+        }
+        
+        try:
+            logger.info("Sending %d sentences to OpenAI for cognate detection", len(processed_sentences))
+            
+            response = self.client.chat.completions.create(
+                model="gpt-4o",
+                messages=[
+                    {
+                        "role": "system", 
+                        "content": COGNATE_DETECTION_PROMPT
+                    },
+                    {
+                        "role": "user",
+                        "content": json.dumps(input_data)
+                    }
+                ],
+                temperature=0
+            )
+            
+            response_content = response.choices[0].message.content
+            logger.info("🔍 OpenAI RAW RESPONSE: %s", response_content)
+            
+            # Check if response content is None
+            if response_content is None:
+                logger.error("OpenAI returned empty response content")
+                return {"results": []}
+            
+            # Strip markdown code blocks if present
+            if response_content.startswith("```json"):
+                response_content = response_content.replace("```json", "").replace("```", "").strip()
+            elif response_content.startswith("```"):
+                response_content = response_content.replace("```", "").strip()
+            
+            # Parse the JSON response
+            raw_results = json.loads(response_content)
+            logger.info("Successfully received cognate detection results from OpenAI")
+            
+            # Handle both compact array format and object format
+            converted_results = {"results": []}
+            
+            for sentence_data in raw_results:
+                # Check if it's object format: {"index": 0, "translated_text": "...", "cognates": [...]}
+                if isinstance(sentence_data, dict):
+                    index = sentence_data.get("index", 0)
+                    translated_text = sentence_data.get("translated_text", "")
+                    token_data = sentence_data.get("cognates", [])
+                    
+                    tokens = []
+                    for token_tuple in token_data:
+                        if len(token_tuple) >= 3:
+                            token_text, cognate_type, cognate_word = token_tuple[0], token_tuple[1], token_tuple[2]
+                            
+                            # Convert "T"/"F" back to full strings
+                            if cognate_type == "T":
+                                cognate_status = "true_cognate"
+                            elif cognate_type == "F":
+                                cognate_status = "false_cognate"
+                            else:
+                                cognate_status = None
+                            
+                            tokens.append({
+                                "text": token_text,
+                                "cognate_status": cognate_status,
+                                "cognate": cognate_word
+                            })
+                    
+                    converted_results["results"].append({
+                        "index": index,
+                        "translated_text": translated_text,
+                        "tokens": tokens
+                    })
+                
+                # Handle compact array format: [index, translated_text, [[token, cognate_type, cognate_word], ...]]
+                elif isinstance(sentence_data, list) and len(sentence_data) >= 3:
+                    index, translated_text, token_data = sentence_data[0], sentence_data[1], sentence_data[2]
+                    
+                    tokens = []
+                    for token_tuple in token_data:
+                        if len(token_tuple) >= 3:
+                            token_text, cognate_type, cognate_word = token_tuple[0], token_tuple[1], token_tuple[2]
+                            
+                            # Convert "T"/"F" back to full strings
+                            if cognate_type == "T":
+                                cognate_status = "true_cognate"
+                            elif cognate_type == "F":
+                                cognate_status = "false_cognate"
+                            else:
+                                cognate_status = None
+                            
+                            tokens.append({
+                                "text": token_text,
+                                "cognate_status": cognate_status,
+                                "cognate": cognate_word
+                            })
+                    
+                    converted_results["results"].append({
+                        "index": index,
+                        "translated_text": translated_text,
+                        "tokens": tokens
+                    })
+            
+            return converted_results
+            
+        except json.JSONDecodeError as e:
+            logger.error("Failed to parse OpenAI response as JSON: %s", str(e))
+            return {"results": []}
+        except Exception as e:
+            logger.error("Error calling OpenAI API: %s", str(e))
+            return {"results": []}
+
+    def detect_cognates_batch(self, requests: List[Dict]) -> Dict:
         if not self.client:
             logger.error("OpenAI client not initialized")
             return {"results": []}
@@ -111,7 +277,7 @@ class OpenAICognateDetector:
                         "content": json.dumps(input_data)
                     }
                 ],
-                temperature=0.1
+                temperature=0
             )
             
             response_content = response.choices[0].message.content
