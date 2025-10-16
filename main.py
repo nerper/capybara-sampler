@@ -73,10 +73,19 @@ async def lifespan(app: FastAPI):
         logger.error("Failed to preload Stanza pipelines: %s", str(e))
         raise RuntimeError(f"Startup failed: Could not preload Stanza pipelines - {str(e)}") from e
     
-    # Test OpenAI connectivity
+    # Preload Argos translation pairs for supported languages (like Stanza preload)
     try:
         from core.openai_cognate_detector import openai_cognate_detector
-        
+        if hasattr(openai_cognate_detector, "preload_supported_pairs"):
+            logger.info("Preloading Argos translation pairs for supported languages...")
+            openai_cognate_detector.preload_supported_pairs()
+        else:
+            logger.info("Argos preload not available on detector instance")
+    except Exception as e:
+        logger.error("Failed to preload Argos pairs: %s", str(e))
+
+    # Test OpenAI connectivity
+    try:
         if openai_cognate_detector.client is None:
             logger.warning("OpenAI client not initialized - cognate detection will be disabled")
         else:
