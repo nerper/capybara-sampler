@@ -300,64 +300,6 @@ class OpenAICognateDetector:
         except Exception as e:
             logger.error("Error calling OpenAI API: %s", str(e))
             return {"results": []}
-    
-    def find_cognates_for_token(self, token_text: str, token_pos: str, phrase: str, 
-                                learning_lang: str, native_lang: str) -> tuple[bool, Optional[str]]:
-        """
-        Find cognate for a single token by calling OpenAI with the full phrase context.
-        
-        Args:
-            token_text: The token to find cognates for
-            token_pos: POS tag of the token
-            phrase: Full phrase containing the token
-            learning_lang: Learning language code
-            native_lang: Native language code
-        
-        Returns:
-            Tuple of (has_cognate: bool, cognate_word: Optional[str])
-        """
-        # Check if POS is valid
-        if token_pos not in VALID_POS_TAGS:
-            logger.debug("Token '%s' has invalid POS '%s' for cognate detection", token_text, token_pos)
-            return False, None
-        
-        # Create a single request
-        request = {
-            "phrase": phrase,
-            "learning_language": learning_lang,
-            "native_language": native_lang,
-            "tokens": [{"text": token_text, "pos": token_pos}]
-        }
-        
-        # Get cognate detection results
-        results = self.detect_cognates_batch([request])
-        
-        # Parse results for this specific token
-        if not results.get("results"):
-            return False, None
-        
-        result = results["results"][0]
-        tokens = result.get("tokens", [])
-        
-        # Find our token in the results
-        for token_result in tokens:
-            if token_result.get("text", "").lower() == token_text.lower():
-                cognate_status = token_result.get("cognate_status")
-                cognate_word = token_result.get("cognate")
-                
-                if cognate_status == "true_cognate":
-                    logger.info("Found true cognate for '%s': '%s'", token_text, cognate_word)
-                    return True, cognate_word
-                elif cognate_status == "false_cognate":
-                    logger.info("Found false cognate for '%s': '%s'", token_text, cognate_word)
-                    return False, cognate_word
-                else:
-                    logger.debug("No cognate found for '%s'", token_text)
-                    return False, None
-        
-        logger.debug("Token '%s' not found in OpenAI results", token_text)
-        return False, None
-
 
 # Global detector instance  
 openai_cognate_detector = OpenAICognateDetector()
