@@ -31,7 +31,8 @@ class TokenScore(BaseModel):
     text: str = Field(..., description="The token text")
     familiarity_score: float = Field(..., description="Familiarity score (0-1) based on word frequency")
     cognate_boosted_familiarity_score: float | None = Field(None, description="Familiarity score with cognate boost applied, null if no cognate found")
-    cognate: str | None = Field(None, description="The cognate word in native language if found")
+    cognate_before_LLM: str | None = Field(None, description="The cognate word found in dataset before LLM validation")
+    cognate_after_LLM: str | None = Field(None, description="The cognate word in native language after LLM validation (null if rejected by LLM)")
 
 
 class SentenceScore(BaseModel):

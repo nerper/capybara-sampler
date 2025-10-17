@@ -46,7 +46,7 @@ class StanzaTokenizer:
         stanza_lang = ISO_TO_STANZA_MAPPING.get(language, language)
         logger.info("Loading Stanza pipeline for language: %s", stanza_lang)
         # Choose processors once; some langs expect mwt (multi-word tokenizer)
-        processors = 'tokenize,mwt,pos'
+        processors = 'tokenize,mwt,pos,lemma'
 
         if stanza_lang not in self._pipelines:
             try:
@@ -100,7 +100,8 @@ class StanzaTokenizer:
             for word in sentence.words:  # type: ignore
                 tokens.append({
                     'text': word.text,  # type: ignore
-                    'pos': word.pos  # type: ignore
+                    'pos': word.pos,  # type: ignore
+                    'lemma': word.lemma  # type: ignore
                 })
             
             sentences_data.append({
@@ -141,7 +142,8 @@ class StanzaTokenizer:
             for word in sentence.words:  # type: ignore
                 tokens.append({
                     'text': word.text,  # type: ignore
-                    'pos': word.pos  # type: ignore
+                    'pos': word.pos,  # type: ignore
+                    'lemma': word.lemma  # type: ignore
                 })
         
         logger.info("Tokenized into %d tokens", len(tokens))

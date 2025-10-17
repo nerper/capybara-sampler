@@ -16,18 +16,28 @@ API_VERSION = "1.0.0"
 COGNET_PATH = "cognates/CogNet-top6.tsv"
 TOP_LANGS = ["eng", "spa", "fra", "ita", "por", "deu"]  # English, Spanish, French, Italian, Portuguese, German
 
-# Language codes
-SUPPORTED_LANGUAGES = {
-    "eng": "English",
-    "ita": "Italian", 
-    "spa": "Spanish"
-}
+# OpenAI configuration
+OPENAI_MODEL = "gpt-4o"
+COGNATE_VALIDATION_PROMPT = """You are a linguistic expert specializing in cognate validation. You will receive word pairs that were identified as potential cognates through orthographic similarity search only. Your task is to determine if they are true cognates (words that share a common etymological origin and have related meanings).
 
+Important considerations:
+- Words must share etymological origin AND have related meanings in the given context to be considered cognates
+- Context matters: "vivid" (English adjective meaning bright/intense) and "vivo" (Spanish adjective meaning bright/lively) ARE cognates, but "vivid" and "vivo" (Spanish verb meaning "I live") are NOT cognates despite sharing etymology
+
+For each pair, respond with only "true" or "false" (no field names, explanations, or additional text to save tokens)."""
+
+# Language codes
 # SUPPORTED_LANGUAGES = {
 #     "eng": "English",
 #     "ita": "Italian", 
-#     "spa": "Spanish",
-#     "fra": "French",
-#     "por": "Portuguese", 
-#     "deu": "German",
+#     "spa": "Spanish"
 # }
+
+SUPPORTED_LANGUAGES = {
+    "eng": "English",
+    "ita": "Italian", 
+    "spa": "Spanish",
+    "fra": "French",
+    "por": "Portuguese", 
+    "deu": "German",
+}
