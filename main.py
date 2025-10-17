@@ -4,7 +4,7 @@ FastAPI application for word familiarity scoring.
 
 import logging
 from contextlib import asynccontextmanager
-from typing import Optional, List
+from typing import List
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 from core.constants import API_VERSION, SUPPORTED_LANGUAGES
@@ -22,29 +22,22 @@ logger = logging.getLogger(__name__)
 class FamiliarityRequest(BaseModel):
     """Request model for familiarity scoring."""
     learning_language: str = Field(..., description="Target language code (e.g., 'spa', 'ita', 'fra', 'eng')")
-    native_language: str = Field(..., description="Native language code for cognate boosting")
+    native_language: str = Field(..., description="Native language code (e.g., 'spa', 'ita', 'fra', 'eng')")
     content: str = Field(..., description="The text content to analyze for familiarity")
 
 
 class TokenScore(BaseModel):
     """Model for individual token scores."""
     text: str = Field(..., description="The token text")
-    familiarity_score: float = Field(..., description="Base familiarity score (0-1)")
-    cognate_familiarity_score: Optional[float] = Field(
-        None, 
-        description="Cognate-boosted familiarity score (0-1), present if cognates found"
-    )
-    cognate: Optional[str] = Field(
-        None,
-        description="Cognate word in the native language, present if cognate found"
-    )
+    familiarity_score: float = Field(..., description="Familiarity score (0-1) based on word frequency")
+    cognate_boosted_familiarity_score: float | None = Field(None, description="Familiarity score with cognate boost applied, null if no cognate found")
+    cognate: str | None = Field(None, description="The cognate word in native language if found")
 
 
 class SentenceScore(BaseModel):
     """Model for sentence-level scores."""
     text: str = Field(..., description="The sentence text")
     index: int = Field(..., description="The index of the sentence in the document")
-    translated_text: Optional[str] = Field(None, description="The translated sentence used for cognate detection")
     tokens: List[TokenScore] = Field(..., description="List of token scores for this sentence")
 
 
@@ -52,7 +45,7 @@ class FamiliarityResponse(BaseModel):
     """Response model for familiarity scoring."""
     content: str = Field(..., description="The analyzed content")
     learning_language: str = Field(..., description="Learning language code of the content")
-    native_language: str = Field(..., description="Native language code used for cognate boosting")
+    native_language: str = Field(..., description="Native language code of the user")
     timestamp: str = Field(..., description="ISO timestamp of analysis")
     sentences: List[SentenceScore] = Field(..., description="List of sentence scores")
     total_tokens: int = Field(..., description="Total number of tokens across all sentences")
@@ -73,26 +66,13 @@ async def lifespan(app: FastAPI):
         logger.error("Failed to preload Stanza pipelines: %s", str(e))
         raise RuntimeError(f"Startup failed: Could not preload Stanza pipelines - {str(e)}") from e
     
-    # Preload Argos translation pairs for supported languages (like Stanza preload)
+    # Load cognates dataset
     try:
-        from core.openai_cognate_detector import openai_cognate_detector
-        if hasattr(openai_cognate_detector, "preload_supported_pairs"):
-            logger.info("Preloading Argos translation pairs for supported languages...")
-            openai_cognate_detector.preload_supported_pairs()
-        else:
-            logger.info("Argos preload not available on detector instance")
+        familiarity_scorer.load_cognates_dataset()
+        logger.info("Successfully loaded cognates dataset")
     except Exception as e:
-        logger.error("Failed to preload Argos pairs: %s", str(e))
-
-    # Test OpenAI connectivity
-    try:
-        if openai_cognate_detector.client is None:
-            logger.warning("OpenAI client not initialized - cognate detection will be disabled")
-        else:
-            logger.info("OpenAI client ready for cognate detection")
-            
-    except Exception as e:
-        logger.error("OpenAI initialization failed: %s", str(e))
+        logger.error("Failed to load cognates dataset: %s", str(e))
+        raise RuntimeError(f"Startup failed: Could not load cognates dataset - {str(e)}") from e
     
     logger.info("API startup complete - all models preloaded")
     
@@ -106,7 +86,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Word Familiarity API",
     version=API_VERSION,
-    description="Computes per-token familiarity scores for phrases in target languages with cognate boosting",
+    description="Computes per-token familiarity scores for phrases in target languages based on word frequency",
     lifespan=lifespan
 )
 
@@ -138,8 +118,8 @@ async def compute_familiarity(request: FamiliarityRequest):
     Compute familiarity scores for all tokens in the content.
     
     The endpoint analyzes each token in each sentence and returns:
-    - Base familiarity score based on word frequency
-    - Cognate-boosted score if cognates are found with the native language
+    - Familiarity score based on word frequency
+    - Cognate-boosted familiarity score if cognates are found
     - Results organized by sentence structure
     
     Args:

@@ -1,16 +1,15 @@
 # Word Familiarity API
 
-A FastAPI application for computing per-token familiarity scores for phrases in target languages, with optional cognate boosting using OpenAI API.
+A FastAPI application for computing per-token familiarity scores for phrases in target languages based on word frequency.
 
 ## Features
 
 - **Token-level Analysis**: Processes phrases using Stanza tokenization (without lemmatization for speed)
 - **Frequency Scoring**: Uses wordfreq library for normalized frequency scores
-- **Cognate Boosting**: Score enhancement based on OpenAI-powered cognate detection
 - **Multi-language Support**: Italian (ita), English (eng), Spanish (spa), French (fra)
 - **RESTful API**: Clean FastAPI interface with comprehensive documentation
 - **Preloaded Models**: All Stanza pipelines loaded at startup for consistent performance
-- **Comprehensive Logging**: Detailed pipeline monitoring and cognate detection logging
+- **Comprehensive Logging**: Detailed pipeline monitoring
 
 ## Supported Languages
 
@@ -46,7 +45,6 @@ poetry run python -c "import stanza; stanza.download('es'); stanza.download('en'
 ```
 
 **Note**: 
-- Ensure OPENAI_API_KEY environment variable is set for cognate detection
 - All Stanza models are preloaded at startup for consistent performance
 - Initial startup may take 10-20 seconds while loading all models
 
@@ -62,7 +60,6 @@ The API will be available at `http://localhost:8000`
 
 **Startup Process:**
 - Preloads all Stanza pipelines for supported languages
-- Initializes OpenAI client for cognate detection
 - Fails fast if any models cannot be loaded
 - Initial startup takes 10-20 seconds but ensures consistent performance
 
@@ -78,9 +75,8 @@ Interactive API documentation is available at:
 curl -X POST "http://localhost:8000/familiarity" \
   -H "Content-Type: application/json" \
   -d '{
-    "phrase": "yo fui a la escuela",
-    "learning_language": "spa",
-    "native_language": "eng"
+    "content": "yo fui a la escuela",
+    "learning_language": "spa"
   }'
 ```
 
@@ -88,16 +84,23 @@ curl -X POST "http://localhost:8000/familiarity" \
 
 ```json
 {
-  "phrase": "yo fui a la escuela",
-  "language": "spa", 
+  "content": "yo fui a la escuela",
+  "learning_language": "spa", 
   "timestamp": "2025-10-13T16:32:00Z",
-  "tokens": [
-    {"text": "yo", "familiarity_score": 0.85},
-    {"text": "fui", "familiarity_score": 0.62},
-    {"text": "a", "familiarity_score": 0.98},
-    {"text": "la", "familiarity_score": 0.95},
-    {"text": "escuela", "familiarity_score": 0.79, "cognate_familiarity_score": 0.84}
-  ]
+  "sentences": [
+    {
+      "text": "yo fui a la escuela",
+      "index": 0,
+      "tokens": [
+        {"text": "yo", "familiarity_score": 0.85},
+        {"text": "fui", "familiarity_score": 0.62},
+        {"text": "a", "familiarity_score": 0.98},
+        {"text": "la", "familiarity_score": 0.95},
+        {"text": "escuela", "familiarity_score": 0.79}
+      ]
+    }
+  ],
+  "total_tokens": 5
 }
 ```
 
@@ -115,12 +118,12 @@ This will demonstrate the API's token analysis and scoring capabilities.
 
 ### Scoring Parameters
 
-Modify scoring weights in `core/constants.py`:
+Modify scoring parameters in `core/constants.py`:
 
 ```python
-FREQ_WEIGHT = 0.8      # Weight for frequency component
-COGNATE_WEIGHT = 0.2   # Weight for cognate boost
-MAX_ZIPF = 7.0         # Maximum Zipf score for normalization
+COGNATE_WEIGHT = 0.2   # Cognate weight constant (kept for legacy reasons)
+MIN_ZIPF = 2.3         # Minimum Zipf score for normalization
+MAX_ZIPF = 7.7         # Maximum Zipf score for normalization
 ```
 
 ### Language Support
@@ -128,14 +131,6 @@ MAX_ZIPF = 7.0         # Maximum Zipf score for normalization
 Add new languages by updating `SUPPORTED_LANGUAGES` in `core/constants.py` and ensuring corresponding Stanza models are available.
 
 ## Data Sources
-
-### OpenAI Cognate Detection
-
-The application uses OpenAI's API for intelligent cognate detection:
-- **Model**: GPT-4o Mini for context-aware cognate analysis
-- **Features**: Handles false cognates, POS validation, context alignment
-- **Configuration**: Requires OPENAI_API_KEY environment variable
-- **Cost Optimization**: Only processes tokens with valid POS (NOUN/VERB/ADJ/ADV)
 
 ### Word Frequency Data
 
@@ -151,8 +146,7 @@ ella-word-familiarity/
 ├── core/
 │   ├── constants.py        # Configuration constants and language mappings
 │   ├── tokenizer.py        # Stanza-based tokenization (no lemmatization)
-│   ├── score_model.py      # Familiarity scoring logic with cognate boosting
-│   └── openai_cognate_detector.py  # OpenAI-based cognate detection
+│   └── score_model.py      # Familiarity scoring logic based on word frequency
 └── data/
     └── README.md           # Data directory documentation
 ```
@@ -177,8 +171,8 @@ For development testing, you can also test individual components:
 # Test tokenization  
 poetry run python -c "from core.tokenizer import tokenizer; print(tokenizer.tokenize('Hello world', 'eng'))"
 
-# Test OpenAI cognate detection (requires OPENAI_API_KEY)
-poetry run python -c "from core.openai_cognate_detector import openai_cognate_detector; print('OpenAI client initialized')"
+# Test scoring model
+poetry run python -c "from core.score_model import familiarity_scorer; print('Familiarity scorer ready')"
 ```
 
 ## Dependencies
@@ -186,7 +180,6 @@ poetry run python -c "from core.openai_cognate_detector import openai_cognate_de
 - **FastAPI**: Web framework for building APIs
 - **Stanza**: Stanford NLP library for tokenization and POS tagging
 - **wordfreq**: Word frequency data from multiple corpora
-- **OpenAI**: OpenAI API client for cognate detection
 - **Pydantic**: Data validation and serialization
 - **uvicorn**: ASGI server for FastAPI
 
@@ -199,4 +192,4 @@ poetry run python -c "from core.openai_cognate_detector import openai_cognate_de
 
 ## License
 
-This project is configured for academic and research use. Ensure compliance with OpenAI API usage policies and terms of service.
+This project is configured for academic and research use.

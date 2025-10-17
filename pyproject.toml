@@ -13,8 +13,7 @@ uvicorn = {extras = ["standard"], version = "^0.24.0"}
 stanza = "^1.7.0"
 wordfreq = "^3.0.3"
 pydantic = "^2.5.0"
-openai = "^1.0.0"
-argostranslate = "^1.9.0"
+polars = "^0.20.0"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^7.4.3"
