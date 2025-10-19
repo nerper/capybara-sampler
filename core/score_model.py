@@ -58,50 +58,8 @@ class FamiliarityScorer:
             # Default to accepting all pairs when OpenAI unavailable
             return {pair: True for pair in flat_cognate_list}
         
-        # First, get LLM validation for all candidates in groups
-        grouped_validation_results = self._validate_cognate_groups_with_llm(flat_cognate_list, group_indices, cognate_groups)
-        
-        # Then apply similarity-based disambiguation for groups with multiple valid cognates
-        final_results = {}
-        
-        for search_key, candidates in cognate_groups.items():
-            search_word = search_key[0]
-            native_language = search_key[2]
-            total_candidates = len(candidates)
-            
-            # Step 1: Apply LLM validation results to filter candidates
-            validated_candidates = []
-            for candidate in candidates:
-                if candidate in grouped_validation_results and grouped_validation_results[candidate]:
-                    validated_candidates.append(candidate)
-            
-            # Log LLM filtering results
-            logger.info("LLM validation for '%s': %d/%d candidates validated as true", 
-                       search_word, len(validated_candidates), total_candidates)
-            
-            if len(validated_candidates) == 0:
-                # No valid cognates after LLM filtering
-                logger.info("No valid cognates for '%s' after LLM validation", search_word)
-                for candidate in candidates:
-                    final_results[candidate] = False
-            elif len(validated_candidates) == 1:
-                # Only one valid cognate after LLM filtering - no disambiguation needed
-                logger.info("Single valid cognate for '%s' after LLM validation: '%s'", 
-                           search_word, validated_candidates[0][2])
-                for candidate in candidates:
-                    final_results[candidate] = (candidate in validated_candidates)
-            else:
-                # Multiple valid cognates after LLM filtering - similarity disambiguation needed
-                valid_cognate_words = [c[2] for c in validated_candidates]
-                logger.info("Multiple valid cognates for '%s' after LLM validation: %s - disambiguating with similarity", 
-                           search_word, valid_cognate_words)
-                
-                # Use the post-LLM similarity method
-                best_candidate = self._select_best_cognate_post_llm(validated_candidates, search_word)
-                
-                # Mark only the best candidate as true, all others as false
-                for candidate in candidates:
-                    final_results[candidate] = (candidate == best_candidate)
+        # Get LLM selection for all candidates in groups (LLM now directly selects best candidate)
+        final_results = self._validate_cognate_groups_with_llm(flat_cognate_list, group_indices, cognate_groups)
         
         return final_results
     
@@ -199,10 +157,10 @@ class FamiliarityScorer:
             response = self.openai_client.chat.completions.create(
                 model=OPENAI_MODEL,
                 messages=[
-                    {"role": "system", "content": COGNATE_VALIDATION_PROMPT + "\n\nRespond with ONLY a JSON array of arrays. Each sub-array contains boolean values for the cognates of one word, in the same order as presented. Example: [[true, false], [true], [false, true, false]]. Do NOT use markdown formatting or code blocks."},
+                    {"role": "system", "content": "You are a linguistic expert in cognate validation. For each word group, return either:\n- An empty string \"\" if none of the candidates are valid cognates\n- The exact candidate word that is the most appropriate cognate considering the phrase context\n\nRespond with ONLY a JSON array of strings. Each string corresponds to one word group in order. Do NOT use markdown formatting or code blocks."},
                     {"role": "user", "content": user_prompt}
                 ],
-                max_tokens=len(cognate_batch) * 15,
+                max_tokens=len(cognate_batch) * 10,
                 temperature=0
             )
             
@@ -232,70 +190,77 @@ class FamiliarityScorer:
                     json_content = parts[1].strip()
                     logger.info("Extracted JSON from code block: %s", json_content)
             
-            # Parse the nested JSON response
+            # Parse the JSON response (array of strings)
             try:
-                nested_response = json.loads(json_content)
-                if not isinstance(nested_response, list):
+                string_response = json.loads(json_content)
+                if not isinstance(string_response, list):
                     raise ValueError("Response is not a list")
-                logger.info("Successfully parsed JSON with %d groups", len(nested_response))
+                logger.info("Successfully parsed JSON with %d group responses", len(string_response))
             except (json.JSONDecodeError, ValueError) as parse_error:
-                logger.warning("Failed to parse nested JSON response for batch %d: %s", batch_idx, parse_error)
+                logger.warning("Failed to parse JSON response for batch %d: %s", batch_idx, parse_error)
                 logger.warning("Attempted to parse: %s", json_content)
-                # Fallback to accepting all - THIS IS THE BUG!
-                logger.error("CRITICAL: Falling back to accepting all pairs as true due to parse failure!")
-                return {pair: True for pair in cognate_batch}
+                # Fallback to rejecting all
+                logger.error("CRITICAL: Falling back to rejecting all pairs due to parse failure!")
+                return {pair: False for pair in cognate_batch}
             
-            # Map nested results back to individual candidates
+            # Map string results back to individual candidates
             results = {}
             group_idx = 0
             
             for search_key, group_candidates in batch_by_groups.items():
-                if group_idx < len(nested_response):
-                    group_results = nested_response[group_idx]
-                    if isinstance(group_results, list):
-                        for i, candidate in enumerate(group_candidates):
-                            if i < len(group_results):
-                                results[candidate] = bool(group_results[i])
-                            else:
-                                results[candidate] = True  # Default
-                    else:
-                        # Single boolean instead of array
+                if group_idx < len(string_response):
+                    selected_cognate = string_response[group_idx].strip()
+                    
+                    if selected_cognate == "":
+                        # LLM rejected all candidates for this group
                         for candidate in group_candidates:
-                            results[candidate] = bool(group_results)
+                            results[candidate] = False
+                        logger.debug("LLM rejected all candidates for group %d", group_idx)
+                    else:
+                        # LLM selected a specific cognate
+                        for candidate in group_candidates:
+                            candidate_word = candidate[2]  # Extract cognate word from tuple
+                            results[candidate] = (candidate_word == selected_cognate)
+                        logger.debug("LLM selected '%s' for group %d", selected_cognate, group_idx)
                 else:
-                    # Missing group results
+                    # Missing group results - default to reject
                     for candidate in group_candidates:
-                        results[candidate] = True
+                        results[candidate] = False
                 
                 group_idx += 1
             
-            # Handle any remaining candidates not covered
+            # Handle any remaining candidates not covered (default to reject)
             for candidate in cognate_batch:
                 if candidate not in results:
-                    results[candidate] = True
+                    results[candidate] = False
             
             # Log consolidated LLM validation results
-            logger.info("LLM Validation Results - Batch %d:", batch_idx)
+            logger.info("LLM Selection Results - Batch %d:", batch_idx)
             group_idx = 0
             for search_key, group_candidates in batch_by_groups.items():
                 search_word = search_key[0]
-                cognate_results = []
                 context_phrase = group_candidates[0][4] if group_candidates else ""  # Get context from first candidate
                 
+                # Find which candidate was selected (if any)
+                selected_candidate = None
                 for candidate in group_candidates:
-                    cognate_word = candidate[2]  # The cognate word
-                    llm_result = results.get(candidate, True)
-                    status = "✓" if llm_result else "✗"
-                    cognate_results.append(f"'{cognate_word}': {status}")
+                    if results.get(candidate, False):
+                        selected_candidate = candidate[2]  # The cognate word
+                        break
                 
-                logger.info("  \"%s\" | '%s' → [%s]", context_phrase, search_word, ", ".join(cognate_results))
+                if selected_candidate:
+                    logger.info("  \"%s\" | '%s' → SELECTED: '%s'", context_phrase, search_word, selected_candidate)
+                else:
+                    candidates_list = [candidate[2] for candidate in group_candidates]
+                    logger.info("  \"%s\" | '%s' → REJECTED: [%s]", context_phrase, search_word, ", ".join(candidates_list))
+                
                 group_idx += 1
             
             return results
             
         except Exception as e:
             logger.error("Grouped batch %d validation failed: %s", batch_idx, str(e))
-            return {pair: True for pair in cognate_batch}
+            return {pair: False for pair in cognate_batch}
     
     def load_cognates_dataset(self):
         """Load and filter the cognates dataset for the top languages."""
