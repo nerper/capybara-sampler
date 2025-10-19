@@ -108,13 +108,23 @@ class FamiliarityScorer:
     def _validate_cognate_groups_with_llm(self, flat_cognate_list: List[tuple], group_indices: Dict, cognate_groups: Dict) -> Dict[tuple, bool]:
         """
         Send cognate groups to LLM and get nested array responses.
+        Batches by groups (search words), not individual cognate pairs.
         """
-        # Split into batches and process in parallel (existing batch logic)
-        batch_size = COGNATE_BATCH_SIZE
-        batches = [flat_cognate_list[i:i + batch_size] for i in range(0, len(flat_cognate_list), batch_size)]
+        # Split into batches by groups (search words), not individual pairs
+        batch_size = COGNATE_BATCH_SIZE  # Max groups per batch
+        group_keys = list(cognate_groups.keys())
+        group_batches = [group_keys[i:i + batch_size] for i in range(0, len(group_keys), batch_size)]
         
-        logger.info("Processing %d cognate candidates in %d batches for LLM validation", 
-                   len(flat_cognate_list), len(batches))
+        # Convert group batches back to flat cognate lists for processing
+        batches = []
+        for group_batch in group_batches:
+            batch_candidates = []
+            for group_key in group_batch:
+                batch_candidates.extend(cognate_groups[group_key])
+            batches.append(batch_candidates)
+        
+        logger.info("Processing %d cognate groups (%d total candidates) in %d batches of max %d groups each", 
+                   len(group_keys), len(flat_cognate_list), len(batches), batch_size)
         
         all_results = {}
         start_time = datetime.now()
@@ -186,13 +196,10 @@ class FamiliarityScorer:
             
             user_prompt = '\n'.join(group_prompts)
             
-            logger.info("OpenAI grouped cognate validation batch %d input (%d groups):\n%s", 
-                       batch_idx, len(batch_by_groups), user_prompt)
-            
             response = self.openai_client.chat.completions.create(
                 model=OPENAI_MODEL,
                 messages=[
-                    {"role": "system", "content": COGNATE_VALIDATION_PROMPT + "\n\nRespond with a JSON array of arrays. Each sub-array contains boolean values for the cognates of one word, in the same order as presented. Example: [[true, false], [true], [false, true, false]]"},
+                    {"role": "system", "content": COGNATE_VALIDATION_PROMPT + "\n\nRespond with ONLY a JSON array of arrays. Each sub-array contains boolean values for the cognates of one word, in the same order as presented. Example: [[true, false], [true], [false, true, false]]. Do NOT use markdown formatting or code blocks."},
                     {"role": "user", "content": user_prompt}
                 ],
                 max_tokens=len(cognate_batch) * 15,
@@ -205,17 +212,37 @@ class FamiliarityScorer:
             else:
                 raise ValueError("Empty response from OpenAI")
             
-            # Log the raw LLM response
-            logger.info("OpenAI grouped batch %d RAW RESPONSE:\n%s", batch_idx, raw_response)
+            # Raw response will be processed and logged in summary below
+            
+            # Extract JSON from markdown code blocks if present
+            json_content = raw_response
+            if "```json" in raw_response:
+                # Extract content between ```json and ```
+                start_marker = "```json"
+                end_marker = "```"
+                start_idx = raw_response.find(start_marker) + len(start_marker)
+                end_idx = raw_response.find(end_marker, start_idx)
+                if start_idx > len(start_marker) - 1 and end_idx > start_idx:
+                    json_content = raw_response[start_idx:end_idx].strip()
+                    logger.info("Extracted JSON from markdown: %s", json_content)
+            elif "```" in raw_response:
+                # Handle plain ``` blocks
+                parts = raw_response.split("```")
+                if len(parts) >= 2:
+                    json_content = parts[1].strip()
+                    logger.info("Extracted JSON from code block: %s", json_content)
             
             # Parse the nested JSON response
             try:
-                nested_response = json.loads(raw_response)
+                nested_response = json.loads(json_content)
                 if not isinstance(nested_response, list):
                     raise ValueError("Response is not a list")
+                logger.info("Successfully parsed JSON with %d groups", len(nested_response))
             except (json.JSONDecodeError, ValueError) as parse_error:
                 logger.warning("Failed to parse nested JSON response for batch %d: %s", batch_idx, parse_error)
-                # Fallback to accepting all
+                logger.warning("Attempted to parse: %s", json_content)
+                # Fallback to accepting all - THIS IS THE BUG!
+                logger.error("CRITICAL: Falling back to accepting all pairs as true due to parse failure!")
                 return {pair: True for pair in cognate_batch}
             
             # Map nested results back to individual candidates
@@ -246,6 +273,23 @@ class FamiliarityScorer:
             for candidate in cognate_batch:
                 if candidate not in results:
                     results[candidate] = True
+            
+            # Log consolidated LLM validation results
+            logger.info("LLM Validation Results - Batch %d:", batch_idx)
+            group_idx = 0
+            for search_key, group_candidates in batch_by_groups.items():
+                search_word = search_key[0]
+                cognate_results = []
+                context_phrase = group_candidates[0][4] if group_candidates else ""  # Get context from first candidate
+                
+                for candidate in group_candidates:
+                    cognate_word = candidate[2]  # The cognate word
+                    llm_result = results.get(candidate, True)
+                    status = "✓" if llm_result else "✗"
+                    cognate_results.append(f"'{cognate_word}': {status}")
+                
+                logger.info("  \"%s\" | '%s' → [%s]", context_phrase, search_word, ", ".join(cognate_results))
+                group_idx += 1
             
             return results
             
@@ -526,7 +570,8 @@ class FamiliarityScorer:
         logger.info("Document sentence-wise tokenization complete - processing %d sentences", len(sentences_data))
         
         # First pass: collect all potential cognate candidates (no disambiguation yet)
-        cognate_groups = {}  # Dict[search_word_key, List[cognate_candidates]]
+        cognate_groups = {}  # Dict[search_word_key, Set[cognate_candidates]]
+        cognate_contexts = {}  # Dict[search_word_key, sentence_context]
         cognate_eligible_pos = {'NOUN', 'VERB', 'ADV', 'ADJ'}
         
         for sentence_data in sentences_data:
@@ -549,10 +594,31 @@ class FamiliarityScorer:
                         
                         if search_key not in cognate_groups:
                             cognate_groups[search_key] = set()  # Use set to ensure uniqueness
+                            cognate_contexts[search_key] = sentence_text  # Store the actual sentence context
                             
-                            # Add ALL unique cognate candidates for this search word
+                            # Add ALL unique cognate candidates for this search word with POS filtering
                             for i in range(len(cognates)):
                                 cognate_row = cognates.row(i, named=True)
+                                
+                                # Get concept ID and extract POS from first letter
+                                concept_id = cognate_row.get('concept id', '')
+                                if concept_id:
+                                    concept_pos_letter = concept_id[0].lower()
+                                    # Map concept ID first letter to POS categories
+                                    concept_pos_mapping = {
+                                        'n': 'NOUN',
+                                        'v': 'VERB', 
+                                        'a': 'ADJ',
+                                        'r': 'ADV'
+                                    }
+                                    concept_pos = concept_pos_mapping.get(concept_pos_letter)
+                                    
+                                    # Check POS compatibility
+                                    if concept_pos and concept_pos != stanza_pos:
+                                        logger.info("POS mismatch: Stanza '%s' vs Concept '%s' for '%s' -> '%s', skipping", 
+                                                   stanza_pos, concept_pos, search_word, 
+                                                   cognate_row['word 1'] if cognate_row['lang 1'].lower() == native_language.lower() else cognate_row['word 2'])
+                                        continue  # Skip this candidate due to POS mismatch
                                 
                                 if cognate_row['lang 1'].lower() == native_language.lower():
                                     candidate_cognate = cognate_row['word 1']
@@ -563,13 +629,14 @@ class FamiliarityScorer:
                                 cognate_candidate = (search_word, learning_language, candidate_cognate, native_language)
                                 cognate_groups[search_key].add(cognate_candidate)
         
-        # Convert sets to lists and add sentence context for LLM validation
+        # Convert sets to lists and add actual sentence context for LLM validation
         final_cognate_groups = {}
         for search_key, unique_candidates in cognate_groups.items():
             final_cognate_groups[search_key] = []
+            actual_context = cognate_contexts[search_key]  # Use the actual sentence where this word was found
             for candidate in unique_candidates:
-                # Add a representative sentence context (could be any sentence with this word)
-                candidate_with_context = candidate + (sentences_data[0]['text'],)  # Use first sentence as context
+                # Add the actual sentence context from where this word was found
+                candidate_with_context = candidate + (actual_context,)
                 final_cognate_groups[search_key].append(candidate_with_context)
         
         # Flatten groups for batch validation
@@ -582,18 +649,11 @@ class FamiliarityScorer:
             flat_cognate_list.extend(candidates)
             current_index += len(candidates)
         
-        # Log unique cognate statistics
+        # Log summary statistics with POS filtering info
         total_unique_candidates = len(flat_cognate_list)
         unique_search_words = len(final_cognate_groups)
         
-        if total_unique_candidates > 0:
-            logger.info("Collected unique cognate candidates:")
-            for search_key, candidates in final_cognate_groups.items():
-                search_word = search_key[0]
-                cognate_words = [candidate[2] for candidate in candidates]
-                logger.info("  '%s' → [%s] (%d candidates)", search_word, ", ".join(f"'{w}'" for w in cognate_words), len(candidates))
-        
-        logger.info("Found %d unique search words with %d total unique cognate candidates for LLM validation", 
+        logger.info("Found %d unique search words with %d total unique cognate candidates for LLM validation (after POS filtering)", 
                    unique_search_words, total_unique_candidates)
         
         # Validate all cognates in batch and reconstruct grouped results
