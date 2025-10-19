@@ -444,7 +444,7 @@ class FamiliarityScorer:
         wordfreq_lang = ISO_TO_STANZA_MAPPING.get(language, language)
         zipf_score = wordfreq.zipf_frequency(word, wordfreq_lang)
         normalized = self.normalize_frequency(zipf_score)
-        logger.debug("Word '%s' (%s): zipf=%.3f, normalized=%.3f", word, wordfreq_lang, zipf_score, normalized)
+        logger.info("Word '%s' (%s): zipf=%.3f, normalized=%.3f", word, wordfreq_lang, zipf_score, normalized)
         return normalized, zipf_score
     
     def compute_token_scores(self, token_info: dict, learning_lang: str, native_lang: str, cognate_validation_results: Optional[Dict] = None) -> dict:
@@ -464,7 +464,7 @@ class FamiliarityScorer:
         word = original_text.lower()
         stanza_pos = token_info.get('pos')
         
-        logger.debug("Processing token: '%s' (pos: %s) -> word: '%s'", 
+        logger.info("Processing token: '%s' (pos: %s) -> word: '%s'", 
                     original_text, stanza_pos or 'unknown', word)
         
         # Get frequency score using the word directly
@@ -484,30 +484,30 @@ class FamiliarityScorer:
         if (self.filtered_cognates_df is not None and 
             stanza_pos in cognate_eligible_pos):
             
-            # Use lemma (base form) for cognate search only for nouns to cover plural, otherwise use the word
+            # Use lemma (base form) for cognate search only for nouns and adjectives, otherwise use the word
             if (stanza_pos == 'NOUN' or stanza_pos == 'ADJ') and token_info.get('lemma'):
                 lemma = token_info.get('lemma')
                 search_word = lemma.lower() if lemma else word
-                logger.info("Using lemma '%s' for noun cognate search (original: '%s')", search_word, word)
+                logger.info("Using lemma '%s' for %s cognate search (original: '%s')", search_word, stanza_pos.lower(), word)
             else:
                 search_word = word
             
             cognates = self.find_cognates(search_word, learning_lang, native_lang)
             if len(cognates) > 0:
                 # Look for pre-computed cognate results first (to avoid re-disambiguation)
+                # IMPORTANT: Use the same search_word that was used during cognate collection
                 cognate_pair_key = None
                 candidate_cognate = None
                 is_valid_cognate = True  # Default to true if no validation results
                 
                 if cognate_validation_results is not None:
-                    # Try to find this cognate pair in the validation results
+                    # Try to find this cognate pair in the validation results using the search_word
                     # The validation results should contain the already-disambiguated cognate
-                    logger.debug("Looking for validated cognates for search_word='%s', learning_lang='%s', native_lang='%s'", 
+                    logger.info("Looking for validated cognates for search_word='%s', learning_lang='%s', native_lang='%s'", 
                                search_word, learning_lang, native_lang)
-                    logger.debug("Available validation keys: %s", list(cognate_validation_results.keys())[:5])  # Show first 5
+                    logger.info("Available validation keys: %s", list(cognate_validation_results.keys())[:5])  # Show first 5
                     
                     for pair_key, validation_result in cognate_validation_results.items():
-                        logger.debug("Checking pair_key: %s with validation_result: %s", pair_key, validation_result)
                         if (pair_key[0] == search_word and 
                             pair_key[1].lower() == learning_lang.lower() and 
                             pair_key[3].lower() == native_lang.lower()):
@@ -515,16 +515,12 @@ class FamiliarityScorer:
                                 candidate_cognate = pair_key[2]  # The pre-selected cognate
                                 is_valid_cognate = validation_result
                                 cognate_pair_key = pair_key
-                                logger.info("FOUND MATCH: search_word='%s' -> candidate_cognate='%s', is_valid=%s", 
-                                           search_word, candidate_cognate, is_valid_cognate)
                                 break
-                            else:
-                                logger.info("MATCH but validation_result=False for: %s", pair_key)
                 
                 # If not found in validation results, no cognates available for this token
                 if candidate_cognate is None:
                     # No cognates were found or validated for this search term
-                    logger.debug("No validated cognates found for '%s' (%s->%s)", search_word, learning_lang, native_lang)
+                    logger.info("No validated cognates found for '%s' (%s->%s)", search_word, learning_lang, native_lang)
                     # Continue without cognate boost
                     pass
                 else:
@@ -536,14 +532,14 @@ class FamiliarityScorer:
                 if is_valid_cognate:
                     cognate_after_LLM = candidate_cognate  # Cognate after LLM validation
                     cognate_boosted_familiarity_score = min(1.0, familiarity_score + COGNATE_BOOST)
-                    logger.debug("Valid cognate confirmed for '%s' [%s]: '%s', applying boost %.3f -> %.3f", 
+                    logger.info("Valid cognate confirmed for '%s' [%s]: '%s', applying boost %.3f -> %.3f", 
                                word, stanza_pos, cognate_after_LLM, familiarity_score, cognate_boosted_familiarity_score)
                 else:
-                    logger.debug("OpenAI rejected cognate pair: '%s'(%s) - '%s'(%s)", 
+                    logger.info("OpenAI rejected cognate pair: '%s'(%s) - '%s'(%s)", 
                                word, learning_lang, candidate_cognate, native_lang)
         else:
             if stanza_pos not in cognate_eligible_pos:
-                logger.debug("Skipping cognate check for '%s' [%s]: POS not eligible", word, stanza_pos)
+                logger.info("Skipping cognate check for '%s' [%s]: POS not eligible", word, stanza_pos)
         
         # Prepare result
         result = {
@@ -642,12 +638,18 @@ class FamiliarityScorer:
         # Convert sets to lists and add actual sentence context for LLM validation
         final_cognate_groups = {}
         for search_key, unique_candidates in cognate_groups.items():
-            final_cognate_groups[search_key] = []
-            actual_context = cognate_contexts[search_key]  # Use the actual sentence where this word was found
-            for candidate in unique_candidates:
-                # Add the actual sentence context from where this word was found
-                candidate_with_context = candidate + (actual_context,)
-                final_cognate_groups[search_key].append(candidate_with_context)
+            # Only include groups that have candidates after POS filtering
+            if len(unique_candidates) > 0:
+                final_cognate_groups[search_key] = []
+                actual_context = cognate_contexts[search_key]  # Use the actual sentence where this word was found
+                for candidate in unique_candidates:
+                    # Add the actual sentence context from where this word was found
+                    candidate_with_context = candidate + (actual_context,)
+                    final_cognate_groups[search_key].append(candidate_with_context)
+            else:
+                # Log when a search word has no candidates after POS filtering
+                search_word = search_key[0]
+                logger.info("No cognate candidates for '%s' after POS filtering - skipping LLM validation", search_word)
         
         # Flatten groups for batch validation
         flat_cognate_list = []
@@ -691,7 +693,7 @@ class FamiliarityScorer:
                 
                 # Skip punctuation tokens entirely
                 if token_pos == 'PUNCT':
-                    logger.debug("Skipping punctuation token: '%s' [POS:%s]", token_info['text'], token_pos)
+                    logger.info("Skipping punctuation token: '%s' [POS:%s]", token_info['text'], token_pos)
                     continue
                 
                 token_scores = self.compute_token_scores(token_info, learning_language, native_language, cognate_validation_results)
