@@ -44,11 +44,11 @@ class StanzaTokenizer:
         """Get or create a Stanza pipeline for the specified language."""
         # Convert 3-letter ISO code to 2-letter Stanza code
         stanza_lang = ISO_TO_STANZA_MAPPING.get(language, language)
-        logger.info("Loading Stanza pipeline for language: %s", stanza_lang)
-        # Choose processors once; some langs expect mwt (multi-word tokenizer)
-        processors = 'tokenize,mwt,pos,lemma'
-
+        
         if stanza_lang not in self._pipelines:
+            logger.info("Loading Stanza pipeline for language: %s", stanza_lang)
+            # Choose processors once; some langs expect mwt (multi-word tokenizer)
+            processors = 'tokenize,mwt,pos,lemma'
             try:
                 logger.info("Creating new Stanza pipeline for %s", stanza_lang)
                 # Try to load the pipeline, download if necessary
@@ -68,6 +68,8 @@ class StanzaTokenizer:
                     verbose=False
                 )
                 logger.info("Successfully downloaded and loaded Stanza model for %s", stanza_lang)
+        else:
+            logger.debug("Using cached Stanza pipeline for %s", stanza_lang)
         
         return self._pipelines[stanza_lang]
     
