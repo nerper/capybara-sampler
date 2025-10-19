@@ -485,7 +485,7 @@ class FamiliarityScorer:
             stanza_pos in cognate_eligible_pos):
             
             # Use lemma (base form) for cognate search only for nouns to cover plural, otherwise use the word
-            if stanza_pos == 'NOUN' and token_info.get('lemma'):
+            if (stanza_pos == 'NOUN' or stanza_pos == 'ADJ') and token_info.get('lemma'):
                 lemma = token_info.get('lemma')
                 search_word = lemma.lower() if lemma else word
                 logger.info("Using lemma '%s' for noun cognate search (original: '%s')", search_word, word)
@@ -502,14 +502,24 @@ class FamiliarityScorer:
                 if cognate_validation_results is not None:
                     # Try to find this cognate pair in the validation results
                     # The validation results should contain the already-disambiguated cognate
+                    logger.debug("Looking for validated cognates for search_word='%s', learning_lang='%s', native_lang='%s'", 
+                               search_word, learning_lang, native_lang)
+                    logger.debug("Available validation keys: %s", list(cognate_validation_results.keys())[:5])  # Show first 5
+                    
                     for pair_key, validation_result in cognate_validation_results.items():
+                        logger.debug("Checking pair_key: %s with validation_result: %s", pair_key, validation_result)
                         if (pair_key[0] == search_word and 
                             pair_key[1].lower() == learning_lang.lower() and 
                             pair_key[3].lower() == native_lang.lower()):
-                            candidate_cognate = pair_key[2]  # The pre-selected cognate
-                            is_valid_cognate = validation_result
-                            cognate_pair_key = pair_key
-                            break
+                            if validation_result:  # Only use if actually validated as true
+                                candidate_cognate = pair_key[2]  # The pre-selected cognate
+                                is_valid_cognate = validation_result
+                                cognate_pair_key = pair_key
+                                logger.info("FOUND MATCH: search_word='%s' -> candidate_cognate='%s', is_valid=%s", 
+                                           search_word, candidate_cognate, is_valid_cognate)
+                                break
+                            else:
+                                logger.info("MATCH but validation_result=False for: %s", pair_key)
                 
                 # If not found in validation results, no cognates available for this token
                 if candidate_cognate is None:
@@ -582,7 +592,7 @@ class FamiliarityScorer:
                 if stanza_pos in cognate_eligible_pos and stanza_pos != 'PUNCT':
                     word = token_info['text'].lower()
                     # Use lemma (base form) for cognate search only for nouns
-                    if stanza_pos == 'NOUN' and token_info.get('lemma'):
+                    if (stanza_pos == 'NOUN' or stanza_pos == 'ADJ') and token_info.get('lemma'):
                         search_word = token_info.get('lemma').lower()
                     else:
                         search_word = word
