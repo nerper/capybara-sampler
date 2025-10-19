@@ -444,7 +444,7 @@ class FamiliarityScorer:
         wordfreq_lang = ISO_TO_STANZA_MAPPING.get(language, language)
         zipf_score = wordfreq.zipf_frequency(word, wordfreq_lang)
         normalized = self.normalize_frequency(zipf_score)
-        logger.info("Word '%s' (%s): zipf=%.3f, normalized=%.3f", word, wordfreq_lang, zipf_score, normalized)
+        logger.debug("Word '%s' (%s): zipf=%.3f, normalized=%.3f", word, wordfreq_lang, zipf_score, normalized)
         return normalized, zipf_score
     
     def compute_token_scores(self, token_info: dict, learning_lang: str, native_lang: str, cognate_validation_results: Optional[Dict] = None) -> dict:
@@ -460,21 +460,26 @@ class FamiliarityScorer:
         Returns:
             Dictionary with token and computed scores
         """
+        token_start = datetime.now()
         original_text = token_info['text']
         word = original_text.lower()
         stanza_pos = token_info.get('pos')
         
-        logger.info("Processing token: '%s' (pos: %s) -> word: '%s'", 
+        logger.debug("Processing token: '%s' (pos: %s) -> word: '%s'", 
                     original_text, stanza_pos or 'unknown', word)
         
         # Get frequency score using the word directly
+        freq_start = datetime.now()
         freq_score, zipf_score = self.get_frequency_score(word, learning_lang)
+        freq_end = datetime.now()
+        logger.debug("⏱️  Frequency lookup for '%s': %.3f ms", word, (freq_end - freq_start).total_seconds() * 1000)
         
         # Compute familiarity score
         familiarity_score = freq_score
         
         # Check for cognates and apply boost if found
         # Only check cognates for nouns, verbs, adverbs, and adjectives
+        cognate_processing_start = datetime.now()
         cognate_before_LLM = None
         cognate_after_LLM = None
         cognate_boosted_familiarity_score = None
@@ -488,60 +493,52 @@ class FamiliarityScorer:
             if (stanza_pos == 'NOUN' or stanza_pos == 'ADJ') and token_info.get('lemma'):
                 lemma = token_info.get('lemma')
                 search_word = lemma.lower() if lemma else word
-                logger.info("Using lemma '%s' for %s cognate search (original: '%s')", search_word, stanza_pos.lower(), word)
+                logger.debug("Using lemma '%s' for %s cognate search (original: '%s')", search_word, stanza_pos.lower(), word)
             else:
                 search_word = word
             
-            cognates = self.find_cognates(search_word, learning_lang, native_lang)
-            if len(cognates) > 0:
-                # Look for pre-computed cognate results first (to avoid re-disambiguation)
-                # IMPORTANT: Use the same search_word that was used during cognate collection
-                cognate_pair_key = None
-                candidate_cognate = None
-                is_valid_cognate = True  # Default to true if no validation results
+            # Just check if this word has any validated cognates from our pre-computed results
+            candidate_cognate = None
+            is_valid_cognate = False
+            
+            if cognate_validation_results is not None:
+                validation_lookup_start = datetime.now()
+                # Look for any validated cognate for this search_word
+                logger.debug("Looking for validated cognates for search_word='%s', learning_lang='%s', native_lang='%s'", 
+                           search_word, learning_lang, native_lang)
                 
-                if cognate_validation_results is not None:
-                    # Try to find this cognate pair in the validation results using the search_word
-                    # The validation results should contain the already-disambiguated cognate
-                    logger.info("Looking for validated cognates for search_word='%s', learning_lang='%s', native_lang='%s'", 
-                               search_word, learning_lang, native_lang)
-                    logger.info("Available validation keys: %s", list(cognate_validation_results.keys())[:5])  # Show first 5
-                    
-                    for pair_key, validation_result in cognate_validation_results.items():
-                        if (pair_key[0] == search_word and 
-                            pair_key[1].lower() == learning_lang.lower() and 
-                            pair_key[3].lower() == native_lang.lower()):
-                            if validation_result:  # Only use if actually validated as true
-                                candidate_cognate = pair_key[2]  # The pre-selected cognate
-                                is_valid_cognate = validation_result
-                                cognate_pair_key = pair_key
-                                break
+                for pair_key, validation_result in cognate_validation_results.items():
+                    if (pair_key[0] == search_word and 
+                        pair_key[1].lower() == learning_lang.lower() and 
+                        pair_key[3].lower() == native_lang.lower() and
+                        validation_result):  # Only use if actually validated as true
+                        candidate_cognate = pair_key[2]  # The pre-selected cognate
+                        is_valid_cognate = True
+                        logger.debug("Found validated cognate: '%s' -> '%s'", search_word, candidate_cognate)
+                        break
                 
-                # If not found in validation results, no cognates available for this token
-                if candidate_cognate is None:
-                    # No cognates were found or validated for this search term
-                    logger.info("No validated cognates found for '%s' (%s->%s)", search_word, learning_lang, native_lang)
-                    # Continue without cognate boost
-                    pass
-                else:
-                    # Store the cognate found before LLM validation
-                    cognate_before_LLM = candidate_cognate
-                
-                # Validation result was already determined above
-                
-                if is_valid_cognate:
-                    cognate_after_LLM = candidate_cognate  # Cognate after LLM validation
-                    cognate_boosted_familiarity_score = min(1.0, familiarity_score + COGNATE_BOOST)
-                    logger.info("Valid cognate confirmed for '%s' [%s]: '%s', applying boost %.3f -> %.3f", 
-                               word, stanza_pos, cognate_after_LLM, familiarity_score, cognate_boosted_familiarity_score)
-                else:
-                    logger.info("OpenAI rejected cognate pair: '%s'(%s) - '%s'(%s)", 
-                               word, learning_lang, candidate_cognate, native_lang)
+                validation_lookup_end = datetime.now()
+                logger.debug("⏱️  Validation lookup for '%s': %.3f ms", search_word, (validation_lookup_end - validation_lookup_start).total_seconds() * 1000)
+            
+            # Apply cognate boost if we found a valid one
+            if candidate_cognate and is_valid_cognate:
+                # Store the cognate (same value before and after LLM since we only keep validated ones)
+                cognate_before_LLM = candidate_cognate
+                cognate_after_LLM = candidate_cognate
+                cognate_boosted_familiarity_score = min(1.0, familiarity_score + COGNATE_BOOST)
+                logger.debug("Valid cognate confirmed for '%s' [%s]: '%s', applying boost %.3f -> %.3f", 
+                           word, stanza_pos, cognate_after_LLM, familiarity_score, cognate_boosted_familiarity_score)
+            else:
+                logger.debug("No validated cognates found for '%s' (%s->%s)", search_word, learning_lang, native_lang)
         else:
             if stanza_pos not in cognate_eligible_pos:
-                logger.info("Skipping cognate check for '%s' [%s]: POS not eligible", word, stanza_pos)
+                logger.debug("Skipping cognate check for '%s' [%s]: POS not eligible", word, stanza_pos)
+        
+        cognate_processing_end = datetime.now()
+        logger.debug("⏱️  Cognate processing for '%s': %.3f ms", word, (cognate_processing_end - cognate_processing_start).total_seconds() * 1000)
         
         # Prepare result
+        result_prep_start = datetime.now()
         result = {
             'text': original_text,  # Use original text to preserve case
             'familiarity_score': round(familiarity_score, 3),
@@ -549,8 +546,14 @@ class FamiliarityScorer:
             'cognate_before_LLM': cognate_before_LLM,
             'cognate_after_LLM': cognate_after_LLM
         }
+        result_prep_end = datetime.now()
         
-        logger.info("Token '%s' [POS:%s]: zipf=%.3f, familiarity_score=%.3f, cognate_before='%s', cognate_after='%s', cognate_boosted=%s", 
+        token_end = datetime.now()
+        logger.debug("⏱️  Token '%s' total processing: %.3f ms (result prep: %.3f ms)", 
+                    word, (token_end - token_start).total_seconds() * 1000,
+                    (result_prep_end - result_prep_start).total_seconds() * 1000)
+        
+        logger.debug("Token '%s' [POS:%s]: zipf=%.3f, familiarity_score=%.3f, cognate_before='%s', cognate_after='%s', cognate_boosted=%s", 
                     original_text, stanza_pos or 'unknown', zipf_score, 
                     result['familiarity_score'], cognate_before_LLM or 'None', cognate_after_LLM or 'None',
                     result['cognate_boosted_familiarity_score'] or 'None')
@@ -569,7 +572,8 @@ class FamiliarityScorer:
         Returns:
             Dictionary with document analysis and sentence/token scores
         """
-        logger.info("Starting document familiarity computation for %s -> %s", learning_language, native_language)
+        document_start = datetime.now()
+        logger.info("🚀 Starting document familiarity computation for %s -> %s", learning_language, native_language)
         
         # Tokenize the document into sentences
         sentences_data = tokenizer.tokenize_document(document, learning_language)
@@ -592,7 +596,10 @@ class FamiliarityScorer:
                         search_word = token_info.get('lemma').lower()
                     else:
                         search_word = word
+                    collection_search_start = datetime.now()
                     cognates = self.find_cognates(search_word, learning_language, native_language)
+                    collection_search_end = datetime.now()
+                    logger.debug("🔍 Collection phase - Cognate DB search for '%s': %.3f ms", search_word, (collection_search_end - collection_search_start).total_seconds() * 1000)
                     
                     if len(cognates) > 0:
                         # Create a key for this search word context
@@ -669,23 +676,31 @@ class FamiliarityScorer:
                    unique_search_words, total_unique_candidates)
         
         # Validate all cognates in batch and reconstruct grouped results
+        llm_validation_start = datetime.now()
         if flat_cognate_list:
             cognate_validation_results = self.validate_cognates_batch(flat_cognate_list, group_indices, final_cognate_groups)
         else:
             cognate_validation_results = {}
+        llm_validation_end = datetime.now()
+        
+        logger.info("✅ LLM validation completed in %.3f seconds", (llm_validation_end - llm_validation_start).total_seconds())
         
         # Process each sentence
+        sentence_processing_start = datetime.now()
+        logger.info("🔄 Starting sentence processing phase...")
         sentence_scores = []
         total_tokens = 0
         
         for sentence_data in sentences_data:
+            sentence_start = datetime.now()
             index = sentence_data['index']
             text = sentence_data['text']
             tokens = sentence_data['tokens']
             
-            logger.info("Processing sentence %d with %d tokens", index, len(tokens))
+            logger.debug("Processing sentence %d with %d tokens", index, len(tokens))
             
             # Compute scores for each token in this sentence
+            token_scoring_start = datetime.now()
             scored_tokens = []
             
             for token_info in tokens:
@@ -693,11 +708,13 @@ class FamiliarityScorer:
                 
                 # Skip punctuation tokens entirely
                 if token_pos == 'PUNCT':
-                    logger.info("Skipping punctuation token: '%s' [POS:%s]", token_info['text'], token_pos)
+                    logger.debug("Skipping punctuation token: '%s' [POS:%s]", token_info['text'], token_pos)
                     continue
                 
                 token_scores = self.compute_token_scores(token_info, learning_language, native_language, cognate_validation_results)
                 scored_tokens.append(token_scores)
+            
+            token_scoring_end = datetime.now()
             
             # Create sentence score object
             sentence_score = {
@@ -709,12 +726,17 @@ class FamiliarityScorer:
             
             total_tokens += len(scored_tokens)  # Count only processed tokens (non-punctuation)
             
-            logger.info("Sentence %d complete - %d tokens processed", index, len(scored_tokens))
+            sentence_end = datetime.now()
+        
+        sentence_processing_end = datetime.now()
+        logger.info("✅ Sentence processing completed in %.3f seconds", (sentence_processing_end - sentence_processing_start).total_seconds())
         
         logger.info("Document scoring complete - %d sentences, %d total tokens", 
                    len(sentences_data), total_tokens)
         
         # Prepare response
+        result_preparation_start = datetime.now()
+        logger.info("📦 Preparing final response...")
         result = {
             'content': document,
             'learning_language': learning_language,
@@ -723,6 +745,18 @@ class FamiliarityScorer:
             'sentences': sentence_scores,
             'total_tokens': total_tokens
         }
+        result_preparation_end = datetime.now()
+        
+        logger.info("✅ Response preparation completed in %.3f seconds", (result_preparation_end - result_preparation_start).total_seconds())
+        
+        # Log total post-LLM processing time
+        total_post_llm_time = (result_preparation_end - llm_validation_end).total_seconds()
+        logger.info("🏁 Total post-LLM processing time: %.3f seconds", total_post_llm_time)
+        
+        # Log total document processing time
+        document_end = datetime.now()
+        total_document_time = (document_end - document_start).total_seconds()
+        logger.info("📊 TOTAL DOCUMENT PROCESSING TIME: %.3f seconds", total_document_time)
         
         return result
 
