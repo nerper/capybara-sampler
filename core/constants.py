@@ -3,7 +3,8 @@ Core constants and coefficients for the familiarity scoring system.
 """
 
 # Scoring weights
-COGNATE_BOOST = 0.2
+MIN_COGNATE_BOOST = 0.2
+MAX_COGNATE_BOOST = 0.4
 
 # Frequency normalization
 MIN_ZIPF = 2.3

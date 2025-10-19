@@ -33,6 +33,7 @@ class TokenScore(BaseModel):
     cognate_boosted_familiarity_score: float | None = Field(None, description="Familiarity score with cognate boost applied, null if no cognate found")
     cognate_before_LLM: str | None = Field(None, description="The cognate word found in dataset before LLM validation")
     cognate_after_LLM: str | None = Field(None, description="The cognate word in native language after LLM validation (null if rejected by LLM)")
+    cognate_similarity: float | None = Field(None, description="Jaro-Winkler similarity score between search word and cognate (0-1), null if no cognate found")
 
 
 class SentenceScore(BaseModel):

@@ -14,7 +14,8 @@ import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor
 import json
 from difflib import SequenceMatcher
-from .constants import MIN_ZIPF, MAX_ZIPF, COGNATE_BOOST, COGNET_PATH, TOP_LANGS, OPENAI_MODEL, COGNATE_VALIDATION_PROMPT, COGNATE_BATCH_SIZE
+import jellyfish
+from .constants import MIN_ZIPF, MAX_ZIPF, MIN_COGNATE_BOOST, MAX_COGNATE_BOOST, COGNET_PATH, TOP_LANGS, OPENAI_MODEL, COGNATE_VALIDATION_PROMPT, COGNATE_BATCH_SIZE
 from .tokenizer import tokenizer, ISO_TO_STANZA_MAPPING
 
 logger = logging.getLogger(__name__)
@@ -522,6 +523,7 @@ class FamiliarityScorer:
         cognate_before_LLM = None
         cognate_after_LLM = None
         cognate_boosted_familiarity_score = None
+        cognate_similarity = None
         
         cognate_eligible_pos = {'NOUN', 'VERB', 'ADV', 'ADJ'}
         
@@ -575,9 +577,16 @@ class FamiliarityScorer:
             if candidate_cognate and is_valid_cognate:
                 # cognate_before_LLM is already set above from pre_llm_candidates
                 cognate_after_LLM = candidate_cognate
-                cognate_boosted_familiarity_score = min(1.0, familiarity_score + COGNATE_BOOST)
-                logger.debug("Valid cognate confirmed for '%s' [%s]: '%s', applying boost %.3f -> %.3f", 
-                           word, stanza_pos, cognate_after_LLM, familiarity_score, cognate_boosted_familiarity_score)
+                
+                # Calculate Jaro-Winkler similarity between search word and cognate
+                cognate_similarity = jellyfish.jaro_winkler(search_word, candidate_cognate)
+                
+                # Modulate cognate boost based on similarity (0 = MIN_COGNATE_BOOST, 1 = MAX_COGNATE_BOOST)
+                cognate_boost = MIN_COGNATE_BOOST + (cognate_similarity * (MAX_COGNATE_BOOST - MIN_COGNATE_BOOST))
+                cognate_boosted_familiarity_score = min(1.0, familiarity_score + cognate_boost)
+                
+                logger.debug("Valid cognate confirmed for '%s' [%s]: '%s', similarity=%.3f, boost=%.3f, %.3f -> %.3f", 
+                           word, stanza_pos, cognate_after_LLM, cognate_similarity, cognate_boost, familiarity_score, cognate_boosted_familiarity_score)
             else:
                 logger.debug("No validated cognates found for '%s' (%s->%s)", search_word, learning_lang, native_lang)
         else:
@@ -594,7 +603,8 @@ class FamiliarityScorer:
             'familiarity_score': round(familiarity_score, 3),
             'cognate_boosted_familiarity_score': round(cognate_boosted_familiarity_score, 3) if cognate_boosted_familiarity_score is not None else None,
             'cognate_before_LLM': cognate_before_LLM,
-            'cognate_after_LLM': cognate_after_LLM
+            'cognate_after_LLM': cognate_after_LLM,
+            'cognate_similarity': round(cognate_similarity, 3) if cognate_similarity is not None else None
         }
         result_prep_end = datetime.now()
         
