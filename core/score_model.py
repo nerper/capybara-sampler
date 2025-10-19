@@ -378,6 +378,80 @@ class FamiliarityScorer:
         
         return similarity
     
+    def _search_cognates_concurrently(self, unique_search_requests: Dict, learning_language: str, native_language: str) -> Dict:
+        """
+        Perform concurrent cognate searches for all unique search requests.
+        
+        Args:
+            unique_search_requests: Dict mapping search_key to (search_word, stanza_pos, sentence_context)
+            learning_language: Learning language code
+            native_language: Native language code
+            
+        Returns:
+            Dict mapping search_key to cognate search results (Polars DataFrame)
+        """
+        if not unique_search_requests:
+            return {}
+        
+        # Determine optimal number of workers
+        max_workers = min(len(unique_search_requests), os.cpu_count() or 4, 8)
+        
+        logger.info("🔍 Starting concurrent cognate search with %d workers for %d search terms", 
+                   max_workers, len(unique_search_requests))
+        
+        cognate_results = {}
+        search_items = list(unique_search_requests.items())
+        
+        def search_single_cognate(item):
+            """Search cognates for a single search request."""
+            search_key, (search_word, stanza_pos, sentence_context) = item
+            try:
+                search_start = datetime.now()
+                cognates = self.find_cognates(search_word, learning_language, native_language)
+                search_end = datetime.now()
+                search_time_ms = (search_end - search_start).total_seconds() * 1000
+                
+                logger.debug("🔍 Concurrent search for '%s': %.3f ms, found %d results", 
+                           search_word, search_time_ms, len(cognates))
+                
+                return search_key, cognates
+            except Exception as e:
+                logger.error("Error searching cognates for '%s': %s", search_word, str(e))
+                return search_key, pl.DataFrame()
+        
+        # Execute searches concurrently
+        concurrent_start = datetime.now()
+        
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_search = {
+                executor.submit(search_single_cognate, item): item 
+                for item in search_items
+            }
+            
+            for future in concurrent.futures.as_completed(future_to_search):
+                item = future_to_search[future]
+                try:
+                    search_key, cognates = future.result()
+                    cognate_results[search_key] = cognates
+                except Exception as e:
+                    search_key = item[0]
+                    logger.error("Concurrent cognate search failed for %s: %s", search_key, str(e))
+                    cognate_results[search_key] = pl.DataFrame()
+        
+        concurrent_end = datetime.now()
+        total_time = (concurrent_end - concurrent_start).total_seconds()
+        
+        # Calculate statistics
+        total_results = sum(len(df) for df in cognate_results.values())
+        searches_with_results = sum(1 for df in cognate_results.values() if len(df) > 0)
+        
+        logger.info("✅ Concurrent cognate search completed: %d searches in %.3f seconds (%.1f searches/sec), "
+                   "%d total results, %d searches found cognates", 
+                   len(cognate_results), total_time, len(cognate_results) / total_time if total_time > 0 else 0,
+                   total_results, searches_with_results)
+        
+        return cognate_results
+    
     def _select_best_cognate_post_llm(self, validated_candidates: List[tuple], search_word: str) -> tuple:
         """
         Select the best cognate from LLM-validated candidates using similarity scoring.
@@ -579,10 +653,9 @@ class FamiliarityScorer:
         sentences_data = tokenizer.tokenize_document(document, learning_language)
         logger.info("Document sentence-wise tokenization complete - processing %d sentences", len(sentences_data))
         
-        # First pass: collect all potential cognate candidates (no disambiguation yet)
-        cognate_groups = {}  # Dict[search_word_key, Set[cognate_candidates]]
-        cognate_contexts = {}  # Dict[search_word_key, sentence_context]
+        # First pass: collect all unique search words that need cognate lookup
         cognate_eligible_pos = {'NOUN', 'VERB', 'ADV', 'ADJ'}
+        unique_search_requests = {}  # Dict[search_key, (search_word, stanza_pos, sentence_context)]
         
         for sentence_data in sentences_data:
             sentence_text = sentence_data['text']
@@ -591,56 +664,67 @@ class FamiliarityScorer:
                 
                 if stanza_pos in cognate_eligible_pos and stanza_pos != 'PUNCT':
                     word = token_info['text'].lower()
-                    # Use lemma (base form) for cognate search only for nouns
+                    # Use lemma (base form) for cognate search only for nouns and adjectives
                     if (stanza_pos == 'NOUN' or stanza_pos == 'ADJ') and token_info.get('lemma'):
                         search_word = token_info.get('lemma').lower()
                     else:
                         search_word = word
-                    collection_search_start = datetime.now()
-                    cognates = self.find_cognates(search_word, learning_language, native_language)
-                    collection_search_end = datetime.now()
-                    logger.debug("🔍 Collection phase - Cognate DB search for '%s': %.3f ms", search_word, (collection_search_end - collection_search_start).total_seconds() * 1000)
                     
-                    if len(cognates) > 0:
-                        # Create a key for this search word context
-                        search_key = (search_word, learning_language, native_language)
+                    search_key = (search_word, learning_language, native_language)
+                    if search_key not in unique_search_requests:
+                        unique_search_requests[search_key] = (search_word, stanza_pos, sentence_text)
+        
+        logger.info("🔍 Starting concurrent cognate search for %d unique search terms", len(unique_search_requests))
+        
+        # Concurrent cognate search phase
+        cognate_search_start = datetime.now()
+        cognate_search_results = self._search_cognates_concurrently(unique_search_requests, learning_language, native_language)
+        cognate_search_end = datetime.now()
+        logger.info("✅ Concurrent cognate search completed in %.3f seconds", (cognate_search_end - cognate_search_start).total_seconds())
+        
+        # Process search results to build cognate groups
+        cognate_groups = {}  # Dict[search_word_key, Set[cognate_candidates]]
+        cognate_contexts = {}  # Dict[search_word_key, sentence_context]
+        
+        for search_key, (search_word, stanza_pos, sentence_context) in unique_search_requests.items():
+            cognates = cognate_search_results.get(search_key, pl.DataFrame())
+            
+            if len(cognates) > 0:
+                cognate_groups[search_key] = set()  # Use set to ensure uniqueness
+                cognate_contexts[search_key] = sentence_context  # Store the actual sentence context
+                
+                # Add ALL unique cognate candidates for this search word with POS filtering
+                for i in range(len(cognates)):
+                    cognate_row = cognates.row(i, named=True)
+                    
+                    # Get concept ID and extract POS from first letter
+                    concept_id = cognate_row.get('concept id', '')
+                    if concept_id:
+                        concept_pos_letter = concept_id[0].lower()
+                        # Map concept ID first letter to POS categories
+                        concept_pos_mapping = {
+                            'n': 'NOUN',
+                            'v': 'VERB', 
+                            'a': 'ADJ',
+                            'r': 'ADV'
+                        }
+                        concept_pos = concept_pos_mapping.get(concept_pos_letter)
                         
-                        if search_key not in cognate_groups:
-                            cognate_groups[search_key] = set()  # Use set to ensure uniqueness
-                            cognate_contexts[search_key] = sentence_text  # Store the actual sentence context
-                            
-                            # Add ALL unique cognate candidates for this search word with POS filtering
-                            for i in range(len(cognates)):
-                                cognate_row = cognates.row(i, named=True)
-                                
-                                # Get concept ID and extract POS from first letter
-                                concept_id = cognate_row.get('concept id', '')
-                                if concept_id:
-                                    concept_pos_letter = concept_id[0].lower()
-                                    # Map concept ID first letter to POS categories
-                                    concept_pos_mapping = {
-                                        'n': 'NOUN',
-                                        'v': 'VERB', 
-                                        'a': 'ADJ',
-                                        'r': 'ADV'
-                                    }
-                                    concept_pos = concept_pos_mapping.get(concept_pos_letter)
-                                    
-                                    # Check POS compatibility
-                                    if concept_pos and concept_pos != stanza_pos:
-                                        logger.info("POS mismatch: Stanza '%s' vs Concept '%s' for '%s' -> '%s', skipping", 
-                                                   stanza_pos, concept_pos, search_word, 
-                                                   cognate_row['word 1'] if cognate_row['lang 1'].lower() == native_language.lower() else cognate_row['word 2'])
-                                        continue  # Skip this candidate due to POS mismatch
-                                
-                                if cognate_row['lang 1'].lower() == native_language.lower():
-                                    candidate_cognate = cognate_row['word 1']
-                                else:
-                                    candidate_cognate = cognate_row['word 2']
-                                
-                                # Create tuple for LLM validation (no sentence context for uniqueness)
-                                cognate_candidate = (search_word, learning_language, candidate_cognate, native_language)
-                                cognate_groups[search_key].add(cognate_candidate)
+                        # Check POS compatibility
+                        if concept_pos and concept_pos != stanza_pos:
+                            logger.info("POS mismatch: Stanza '%s' vs Concept '%s' for '%s' -> '%s', skipping", 
+                                       stanza_pos, concept_pos, search_word, 
+                                       cognate_row['word 1'] if cognate_row['lang 1'].lower() == native_language.lower() else cognate_row['word 2'])
+                            continue  # Skip this candidate due to POS mismatch
+                    
+                    if cognate_row['lang 1'].lower() == native_language.lower():
+                        candidate_cognate = cognate_row['word 1']
+                    else:
+                        candidate_cognate = cognate_row['word 2']
+                    
+                    # Create tuple for LLM validation (no sentence context for uniqueness)
+                    cognate_candidate = (search_word, learning_language, candidate_cognate, native_language)
+                    cognate_groups[search_key].add(cognate_candidate)
         
         # Convert sets to lists and add actual sentence context for LLM validation
         final_cognate_groups = {}
