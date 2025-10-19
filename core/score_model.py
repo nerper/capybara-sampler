@@ -521,7 +521,7 @@ class FamiliarityScorer:
         logger.debug("Word '%s' (%s): zipf=%.3f, normalized=%.3f", word, wordfreq_lang, zipf_score, normalized)
         return normalized, zipf_score
     
-    def compute_token_scores(self, token_info: dict, learning_lang: str, native_lang: str, cognate_validation_results: Optional[Dict] = None) -> dict:
+    def compute_token_scores(self, token_info: dict, learning_lang: str, native_lang: str, cognate_validation_results: Optional[Dict] = None, pre_llm_candidates: Optional[Dict] = None) -> dict:
         """
         Compute familiarity scores for a single token.
         
@@ -571,6 +571,18 @@ class FamiliarityScorer:
             else:
                 search_word = word
             
+            # Look up pre-LLM candidates for this search word
+            search_key = (search_word, learning_lang, native_lang)
+            if pre_llm_candidates and search_key in pre_llm_candidates:
+                pre_llm_candidate_list = pre_llm_candidates[search_key]
+                # Store all candidates as a comma-separated string, or just the first one if only one
+                if len(pre_llm_candidate_list) == 1:
+                    cognate_before_LLM = pre_llm_candidate_list[0]
+                else:
+                    cognate_before_LLM = ", ".join(pre_llm_candidate_list)
+                logger.debug("Found %d pre-LLM candidates for '%s': %s", 
+                           len(pre_llm_candidate_list), search_word, cognate_before_LLM)
+            
             # Just check if this word has any validated cognates from our pre-computed results
             candidate_cognate = None
             is_valid_cognate = False
@@ -596,8 +608,7 @@ class FamiliarityScorer:
             
             # Apply cognate boost if we found a valid one
             if candidate_cognate and is_valid_cognate:
-                # Store the cognate (same value before and after LLM since we only keep validated ones)
-                cognate_before_LLM = candidate_cognate
+                # cognate_before_LLM is already set above from pre_llm_candidates
                 cognate_after_LLM = candidate_cognate
                 cognate_boosted_familiarity_score = min(1.0, familiarity_score + COGNATE_BOOST)
                 logger.debug("Valid cognate confirmed for '%s' [%s]: '%s', applying boost %.3f -> %.3f", 
@@ -759,6 +770,12 @@ class FamiliarityScorer:
         logger.info("Found %d unique search words with %d total unique cognate candidates for LLM validation (after POS filtering)", 
                    unique_search_words, total_unique_candidates)
         
+        # Build pre-LLM candidate lookup for cognate_before_LLM field
+        pre_llm_candidates = {}  # Dict[search_key, List[candidate_cognate_words]]
+        for search_key, candidates in final_cognate_groups.items():
+            candidate_words = [candidate[2] for candidate in candidates]  # Extract cognate words
+            pre_llm_candidates[search_key] = candidate_words
+        
         # Validate all cognates in batch and reconstruct grouped results
         llm_validation_start = datetime.now()
         if flat_cognate_list:
@@ -795,7 +812,7 @@ class FamiliarityScorer:
                     logger.debug("Skipping punctuation token: '%s' [POS:%s]", token_info['text'], token_pos)
                     continue
                 
-                token_scores = self.compute_token_scores(token_info, learning_language, native_language, cognate_validation_results)
+                token_scores = self.compute_token_scores(token_info, learning_language, native_language, cognate_validation_results, pre_llm_candidates=pre_llm_candidates)
                 scored_tokens.append(token_scores)
             
             token_scoring_end = datetime.now()
