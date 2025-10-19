@@ -4,12 +4,17 @@ Core scoring model for computing familiarity scores based on word frequency.
 
 import logging
 import os
-from typing import List, Dict
+from typing import List, Dict, Optional
 from datetime import datetime
 import wordfreq
 import polars as pl
 from openai import OpenAI
-from .constants import MIN_ZIPF, MAX_ZIPF, COGNATE_BOOST, COGNET_PATH, TOP_LANGS, OPENAI_MODEL, COGNATE_VALIDATION_PROMPT
+import asyncio
+import concurrent.futures
+from concurrent.futures import ThreadPoolExecutor
+import json
+from difflib import SequenceMatcher
+from .constants import MIN_ZIPF, MAX_ZIPF, COGNATE_BOOST, COGNET_PATH, TOP_LANGS, OPENAI_MODEL, COGNATE_VALIDATION_PROMPT, COGNATE_BATCH_SIZE
 from .tokenizer import tokenizer, ISO_TO_STANZA_MAPPING
 
 logger = logging.getLogger(__name__)
@@ -37,76 +42,216 @@ class FamiliarityScorer:
         else:
             logger.warning("OPENAI_API_KEY not found - cognate validation will be skipped")
     
-    def validate_cognates_batch(self, cognate_pairs: List[tuple]) -> Dict[tuple, bool]:
+    def validate_cognates_batch(self, flat_cognate_list: List[tuple], group_indices: Dict, cognate_groups: Dict) -> Dict[tuple, bool]:
         """
-        Validate multiple cognate pairs using OpenAI GPT-4o Mini in a single request.
+        Validate cognate groups using OpenAI with nested array responses.
         
         Args:
-            cognate_pairs: List of tuples (word1, lang1, word2, lang2, phrase)
+            flat_cognate_list: Flattened list of all cognate candidates
+            group_indices: Mapping of search_key to (start_idx, end_idx) in flat list
+            cognate_groups: Original grouped cognate data
             
         Returns:
-            Dictionary mapping cognate pairs to validation results
+            Dictionary mapping individual cognate pairs to validation results after LLM + similarity filtering
         """
-        if not self.openai_client or not cognate_pairs:
+        if not self.openai_client or not flat_cognate_list:
             # Default to accepting all pairs when OpenAI unavailable
-            return {pair: True for pair in cognate_pairs}
+            return {pair: True for pair in flat_cognate_list}
         
+        # First, get LLM validation for all candidates in groups
+        grouped_validation_results = self._validate_cognate_groups_with_llm(flat_cognate_list, group_indices, cognate_groups)
+        
+        # Then apply similarity-based disambiguation for groups with multiple valid cognates
+        final_results = {}
+        
+        for search_key, candidates in cognate_groups.items():
+            search_word = search_key[0]
+            native_language = search_key[2]
+            total_candidates = len(candidates)
+            
+            # Step 1: Apply LLM validation results to filter candidates
+            validated_candidates = []
+            for candidate in candidates:
+                if candidate in grouped_validation_results and grouped_validation_results[candidate]:
+                    validated_candidates.append(candidate)
+            
+            # Log LLM filtering results
+            logger.info("LLM validation for '%s': %d/%d candidates validated as true", 
+                       search_word, len(validated_candidates), total_candidates)
+            
+            if len(validated_candidates) == 0:
+                # No valid cognates after LLM filtering
+                logger.info("No valid cognates for '%s' after LLM validation", search_word)
+                for candidate in candidates:
+                    final_results[candidate] = False
+            elif len(validated_candidates) == 1:
+                # Only one valid cognate after LLM filtering - no disambiguation needed
+                logger.info("Single valid cognate for '%s' after LLM validation: '%s'", 
+                           search_word, validated_candidates[0][2])
+                for candidate in candidates:
+                    final_results[candidate] = (candidate in validated_candidates)
+            else:
+                # Multiple valid cognates after LLM filtering - similarity disambiguation needed
+                valid_cognate_words = [c[2] for c in validated_candidates]
+                logger.info("Multiple valid cognates for '%s' after LLM validation: %s - disambiguating with similarity", 
+                           search_word, valid_cognate_words)
+                
+                # Use the post-LLM similarity method
+                best_candidate = self._select_best_cognate_post_llm(validated_candidates, search_word)
+                
+                # Mark only the best candidate as true, all others as false
+                for candidate in candidates:
+                    final_results[candidate] = (candidate == best_candidate)
+        
+        return final_results
+    
+    def _validate_cognate_groups_with_llm(self, flat_cognate_list: List[tuple], group_indices: Dict, cognate_groups: Dict) -> Dict[tuple, bool]:
+        """
+        Send cognate groups to LLM and get nested array responses.
+        """
+        # Split into batches and process in parallel (existing batch logic)
+        batch_size = COGNATE_BATCH_SIZE
+        batches = [flat_cognate_list[i:i + batch_size] for i in range(0, len(flat_cognate_list), batch_size)]
+        
+        logger.info("Processing %d cognate candidates in %d batches for LLM validation", 
+                   len(flat_cognate_list), len(batches))
+        
+        all_results = {}
+        start_time = datetime.now()
+        max_concurrent = min(len(batches), 4)
+        
+        with ThreadPoolExecutor(max_workers=max_concurrent) as executor:
+            future_to_batch = {
+                executor.submit(self._validate_single_batch_grouped, batch, batch_idx, group_indices, cognate_groups): batch 
+                for batch_idx, batch in enumerate(batches)
+            }
+            
+            for future in concurrent.futures.as_completed(future_to_batch):
+                batch = future_to_batch[future]
+                try:
+                    batch_results = future.result()
+                    all_results.update(batch_results)
+                    logger.info("Completed grouped batch with %d pairs", len(batch))
+                except Exception as e:
+                    logger.error("Grouped batch validation failed: %s", str(e))
+                    for pair in batch:
+                        all_results[pair] = True
+        
+        end_time = datetime.now()
+        elapsed = (end_time - start_time).total_seconds()
+        logger.info("Completed grouped LLM validation of %d cognate candidates in %.2f seconds", 
+                   len(all_results), elapsed)
+        return all_results
+    
+    def _validate_single_batch_grouped(self, cognate_batch: List[tuple], batch_idx: int, group_indices: Dict, cognate_groups: Dict) -> Dict[tuple, bool]:
+        """
+        Validate a single batch with grouped cognate structure for LLM.
+        This will request nested arrays like [[true,false], [true], [false,true,false]]
+        """
         try:
+            # Build prompt showing grouped structure
+            group_prompts = []
+            group_counter = 1
+            
+            # We need to organize this batch by groups for the prompt
+            batch_by_groups = {}
+            for candidate in cognate_batch:
+                search_word = candidate[0]
+                learning_lang = candidate[1] 
+                native_lang = candidate[3]
+                search_key = (search_word, learning_lang, native_lang)
+                
+                if search_key not in batch_by_groups:
+                    batch_by_groups[search_key] = []
+                batch_by_groups[search_key].append(candidate)
+            
             # Create language names mapping
             lang_names = {
                 'eng': 'English', 'spa': 'Spanish', 'fra': 'French', 
                 'ita': 'Italian', 'por': 'Portuguese', 'deu': 'German'
             }
             
-            # Build the batch prompt
-            pair_prompts = []
-            for i, (word1, lang1, word2, lang2, phrase) in enumerate(cognate_pairs, 1):
-                lang1_name = lang_names.get(lang1, lang1)
-                lang2_name = lang_names.get(lang2, lang2)
-                pair_prompts.append(f'{i}. "{word1}" ({lang1_name}) and "{word2}" ({lang2_name}) - Context: "{phrase}"')
+            for search_key, group_candidates in batch_by_groups.items():
+                search_word, learning_lang, native_lang = search_key
+                lang1_name = lang_names.get(learning_lang, learning_lang)
+                lang2_name = lang_names.get(native_lang, native_lang)
+                
+                cognate_list = [f'"{candidate[2]}"' for candidate in group_candidates]
+                context = group_candidates[0][4]  # Use first sentence as context
+                
+                group_prompts.append(
+                    f'{group_counter}. "{search_word}" ({lang1_name}) → [{", ".join(cognate_list)}] ({lang2_name}) - Context: "{context}"'
+                )
+                group_counter += 1
             
-            user_prompt = '\n'.join(pair_prompts)
+            user_prompt = '\n'.join(group_prompts)
             
-            # Log the input prompt
-            logger.info("OpenAI cognate validation batch input:\n%s", user_prompt)
+            logger.info("OpenAI grouped cognate validation batch %d input (%d groups):\n%s", 
+                       batch_idx, len(batch_by_groups), user_prompt)
             
             response = self.openai_client.chat.completions.create(
                 model=OPENAI_MODEL,
                 messages=[
-                    {"role": "system", "content": COGNATE_VALIDATION_PROMPT + "\n\nRespond with one 'true' or 'false' per line, matching the numbered order."},
+                    {"role": "system", "content": COGNATE_VALIDATION_PROMPT + "\n\nRespond with a JSON array of arrays. Each sub-array contains boolean values for the cognates of one word, in the same order as presented. Example: [[true, false], [true], [false, true, false]]"},
                     {"role": "user", "content": user_prompt}
                 ],
-                max_tokens=len(cognate_pairs) * 10,
+                max_tokens=len(cognate_batch) * 15,
                 temperature=0
             )
             
-            raw_response = response.choices[0].message.content.strip()
+            raw_response = response.choices[0].message.content
+            if raw_response:
+                raw_response = raw_response.strip()
+            else:
+                raise ValueError("Empty response from OpenAI")
             
-            # Log the raw response
-            logger.info("OpenAI cognate validation batch raw response:\n%s", raw_response)
+            # Log the raw LLM response
+            logger.info("OpenAI grouped batch %d RAW RESPONSE:\n%s", batch_idx, raw_response)
             
-            # Parse the response
-            response_lines = [line.strip().lower() for line in raw_response.split('\n') if line.strip()]
+            # Parse the nested JSON response
+            try:
+                nested_response = json.loads(raw_response)
+                if not isinstance(nested_response, list):
+                    raise ValueError("Response is not a list")
+            except (json.JSONDecodeError, ValueError) as parse_error:
+                logger.warning("Failed to parse nested JSON response for batch %d: %s", batch_idx, parse_error)
+                # Fallback to accepting all
+                return {pair: True for pair in cognate_batch}
+            
+            # Map nested results back to individual candidates
             results = {}
+            group_idx = 0
             
-            for i, pair in enumerate(cognate_pairs):
-                if i < len(response_lines):
-                    is_valid = response_lines[i] == "true"
-                    results[pair] = is_valid
-                    logger.info("Cognate validation: %s(%s)-%s(%s) in '%s' -> %s", 
-                               pair[0], pair[1], pair[2], pair[3], pair[4], is_valid)
+            for search_key, group_candidates in batch_by_groups.items():
+                if group_idx < len(nested_response):
+                    group_results = nested_response[group_idx]
+                    if isinstance(group_results, list):
+                        for i, candidate in enumerate(group_candidates):
+                            if i < len(group_results):
+                                results[candidate] = bool(group_results[i])
+                            else:
+                                results[candidate] = True  # Default
+                    else:
+                        # Single boolean instead of array
+                        for candidate in group_candidates:
+                            results[candidate] = bool(group_results)
                 else:
-                    # Default to True if response is shorter than expected
-                    results[pair] = True
-                    logger.warning("Missing response for cognate pair %s(%s)-%s(%s), defaulting to True", 
-                                 pair[0], pair[1], pair[2], pair[3])
+                    # Missing group results
+                    for candidate in group_candidates:
+                        results[candidate] = True
+                
+                group_idx += 1
+            
+            # Handle any remaining candidates not covered
+            for candidate in cognate_batch:
+                if candidate not in results:
+                    results[candidate] = True
             
             return results
             
         except Exception as e:
-            logger.error("OpenAI batch validation failed: %s", str(e))
-            # Default to accepting all pairs on API errors
-            return {pair: True for pair in cognate_pairs}
+            logger.error("Grouped batch %d validation failed: %s", batch_idx, str(e))
+            return {pair: True for pair in cognate_batch}
     
     def load_cognates_dataset(self):
         """Load and filter the cognates dataset for the top languages."""
@@ -119,7 +264,7 @@ class FamiliarityScorer:
                 low_memory=True,
             )
             
-            logger.info(f"Loaded {self.cognates_df.shape[0]:,} rows with columns {self.cognates_df.columns}")
+            logger.info(f"Loaded {self.cognates_df.shape[0]:,} cognate rows")
             
             # Pre-filter for top languages
             self.filtered_cognates_df = self.cognates_df.filter(
@@ -168,6 +313,61 @@ class FamiliarityScorer:
             ]
         )
     
+    def _calculate_cognate_similarity(self, word1: str, word2: str) -> float:
+        """
+        Calculate similarity score between two words for cognate disambiguation.
+        Uses string similarity to prioritize more similar cognates.
+        
+        Args:
+            word1: First word to compare
+            word2: Second word to compare
+            
+        Returns:
+            Similarity score between 0 and 1 (1 being identical)
+        """
+        # Normalize words to lowercase for comparison
+        word1 = word1.lower().strip()
+        word2 = word2.lower().strip()
+        
+        # Use SequenceMatcher for similarity scoring
+        similarity = SequenceMatcher(None, word1, word2).ratio()
+        
+        return similarity
+    
+    def _select_best_cognate_post_llm(self, validated_candidates: List[tuple], search_word: str) -> tuple:
+        """
+        Select the best cognate from LLM-validated candidates using similarity scoring.
+        This method only runs AFTER LLM validation, not before.
+        
+        Args:
+            validated_candidates: List of LLM-validated cognate tuples
+            search_word: The original word we're searching cognates for
+            
+        Returns:
+            Best cognate tuple based on similarity
+        """
+        if len(validated_candidates) == 1:
+            return validated_candidates[0]
+        
+        # Calculate similarities for validated candidates
+        similarities = []
+        for candidate in validated_candidates:
+            cognate_word = candidate[2]  # The cognate word
+            similarity = self._calculate_cognate_similarity(search_word, cognate_word)
+            similarities.append((candidate, similarity))
+        
+        # Sort by similarity (highest first)
+        similarities.sort(key=lambda x: x[1], reverse=True)
+        
+        # Log disambiguation decision  
+        logger.info("Post-LLM similarity disambiguation for '%s' (%d valid candidates):", search_word, len(validated_candidates))
+        for i, (candidate, similarity) in enumerate(similarities[:3]):  # Show top 3
+            cognate_word = candidate[2]
+            marker = " ← SELECTED" if i == 0 else ""
+            logger.info("  %d. '%s' (similarity: %.3f)%s", i + 1, cognate_word, similarity, marker)
+        
+        return similarities[0][0]  # Return best candidate
+    
     def normalize_frequency(self, zipf_score: float) -> float:
         """
         Normalize Zipf frequency score to [0,1] range.
@@ -203,7 +403,7 @@ class FamiliarityScorer:
         logger.debug("Word '%s' (%s): zipf=%.3f, normalized=%.3f", word, wordfreq_lang, zipf_score, normalized)
         return normalized, zipf_score
     
-    def compute_token_scores(self, token_info: dict, learning_lang: str, native_lang: str, cognate_validation_results: Dict = None) -> dict:
+    def compute_token_scores(self, token_info: dict, learning_lang: str, native_lang: str, cognate_validation_results: Optional[Dict] = None) -> dict:
         """
         Compute familiarity scores for a single token.
         
@@ -240,36 +440,44 @@ class FamiliarityScorer:
         if (self.filtered_cognates_df is not None and 
             stanza_pos in cognate_eligible_pos):
             
-            # Use lemma (base form) for cognate search only for nouns, otherwise use the word
+            # Use lemma (base form) for cognate search only for nouns to cover plural, otherwise use the word
             if stanza_pos == 'NOUN' and token_info.get('lemma'):
-                search_word = token_info.get('lemma').lower()
+                lemma = token_info.get('lemma')
+                search_word = lemma.lower() if lemma else word
                 logger.info("Using lemma '%s' for noun cognate search (original: '%s')", search_word, word)
             else:
                 search_word = word
             
             cognates = self.find_cognates(search_word, learning_lang, native_lang)
             if len(cognates) > 0:
-                # Get the first cognate match
-                first_cognate = cognates.row(0, named=True)
-                
-                # Extract the cognate word (the word in the native language)
-                if first_cognate['lang 1'].lower() == native_lang.lower():
-                    candidate_cognate = first_cognate['word 1']
-                else:
-                    candidate_cognate = first_cognate['word 2']
-                
-                # Store the cognate found before LLM validation
-                cognate_before_LLM = candidate_cognate
-                
-                # Look for this cognate pair in validation results
+                # Look for pre-computed cognate results first (to avoid re-disambiguation)
+                cognate_pair_key = None
+                candidate_cognate = None
                 is_valid_cognate = True  # Default to true if no validation results
+                
                 if cognate_validation_results is not None:
-                    is_valid_cognate = False
-                    for (val_word, val_lang1, val_cognate, val_lang2, val_sentence), is_valid in cognate_validation_results.items():
-                        if (val_word == search_word and val_lang1 == learning_lang and 
-                            val_cognate == candidate_cognate and val_lang2 == native_lang):
-                            is_valid_cognate = is_valid
+                    # Try to find this cognate pair in the validation results
+                    # The validation results should contain the already-disambiguated cognate
+                    for pair_key, validation_result in cognate_validation_results.items():
+                        if (pair_key[0] == search_word and 
+                            pair_key[1].lower() == learning_lang.lower() and 
+                            pair_key[3].lower() == native_lang.lower()):
+                            candidate_cognate = pair_key[2]  # The pre-selected cognate
+                            is_valid_cognate = validation_result
+                            cognate_pair_key = pair_key
                             break
+                
+                # If not found in validation results, no cognates available for this token
+                if candidate_cognate is None:
+                    # No cognates were found or validated for this search term
+                    logger.debug("No validated cognates found for '%s' (%s->%s)", search_word, learning_lang, native_lang)
+                    # Continue without cognate boost
+                    pass
+                else:
+                    # Store the cognate found before LLM validation
+                    cognate_before_LLM = candidate_cognate
+                
+                # Validation result was already determined above
                 
                 if is_valid_cognate:
                     cognate_after_LLM = candidate_cognate  # Cognate after LLM validation
@@ -315,49 +523,84 @@ class FamiliarityScorer:
         
         # Tokenize the document into sentences
         sentences_data = tokenizer.tokenize_document(document, learning_language)
-        logger.info("Document segmentation complete - processing %d sentences", len(sentences_data))
+        logger.info("Document sentence-wise tokenization complete - processing %d sentences", len(sentences_data))
         
-        # First pass: collect all potential cognate candidates
-        cognate_candidates = []
-        cognate_pairs_seen = set()  # Track unique pairs to avoid duplicates
+        # First pass: collect all potential cognate candidates (no disambiguation yet)
+        cognate_groups = {}  # Dict[search_word_key, List[cognate_candidates]]
         cognate_eligible_pos = {'NOUN', 'VERB', 'ADV', 'ADJ'}
         
-        if self.filtered_cognates_df is not None:
-            for sentence_data in sentences_data:
-                sentence_text = sentence_data['text']
-                for token_info in sentence_data['tokens']:
-                    stanza_pos = token_info.get('pos', 'unknown')
+        for sentence_data in sentences_data:
+            sentence_text = sentence_data['text']
+            for token_info in sentence_data['tokens']:
+                stanza_pos = token_info.get('pos', 'unknown')
+                
+                if stanza_pos in cognate_eligible_pos and stanza_pos != 'PUNCT':
+                    word = token_info['text'].lower()
+                    # Use lemma (base form) for cognate search only for nouns
+                    if stanza_pos == 'NOUN' and token_info.get('lemma'):
+                        search_word = token_info.get('lemma').lower()
+                    else:
+                        search_word = word
+                    cognates = self.find_cognates(search_word, learning_language, native_language)
                     
-                    if stanza_pos in cognate_eligible_pos and stanza_pos != 'PUNCT':
-                        word = token_info['text'].lower()
-                        # Use lemma (base form) for cognate search only for nouns
-                        if stanza_pos == 'NOUN' and token_info.get('lemma'):
-                            search_word = token_info.get('lemma').lower()
-                        else:
-                            search_word = word
-                        cognates = self.find_cognates(search_word, learning_language, native_language)
+                    if len(cognates) > 0:
+                        # Create a key for this search word context
+                        search_key = (search_word, learning_language, native_language)
                         
-                        if len(cognates) > 0:
-                            first_cognate = cognates.row(0, named=True)
+                        if search_key not in cognate_groups:
+                            cognate_groups[search_key] = set()  # Use set to ensure uniqueness
                             
-                            if first_cognate['lang 1'].lower() == native_language.lower():
-                                candidate_cognate = first_cognate['word 1']
-                            else:
-                                candidate_cognate = first_cognate['word 2']
-                            
-                            # Create simple 4-tuple key for deduplication using search_word (lemma)
-                            cognate_key = (search_word, learning_language, candidate_cognate, native_language)
-                            
-                            if cognate_key not in cognate_pairs_seen:
-                                cognate_pairs_seen.add(cognate_key)
-                                # Add 5-tuple with sentence context for OpenAI validation
-                                cognate_pair = (search_word, learning_language, candidate_cognate, native_language, sentence_text)
-                                cognate_candidates.append(cognate_pair)
+                            # Add ALL unique cognate candidates for this search word
+                            for i in range(len(cognates)):
+                                cognate_row = cognates.row(i, named=True)
+                                
+                                if cognate_row['lang 1'].lower() == native_language.lower():
+                                    candidate_cognate = cognate_row['word 1']
+                                else:
+                                    candidate_cognate = cognate_row['word 2']
+                                
+                                # Create tuple for LLM validation (no sentence context for uniqueness)
+                                cognate_candidate = (search_word, learning_language, candidate_cognate, native_language)
+                                cognate_groups[search_key].add(cognate_candidate)
         
-        logger.info("Found %d unique cognate candidates for batch validation", len(cognate_candidates))
+        # Convert sets to lists and add sentence context for LLM validation
+        final_cognate_groups = {}
+        for search_key, unique_candidates in cognate_groups.items():
+            final_cognate_groups[search_key] = []
+            for candidate in unique_candidates:
+                # Add a representative sentence context (could be any sentence with this word)
+                candidate_with_context = candidate + (sentences_data[0]['text'],)  # Use first sentence as context
+                final_cognate_groups[search_key].append(candidate_with_context)
         
-        # Validate all cognates in batch
-        cognate_validation_results = self.validate_cognates_batch(cognate_candidates)
+        # Flatten groups for batch validation
+        flat_cognate_list = []
+        group_indices = {}  # Map to reconstruct groups from flat results
+        current_index = 0
+        
+        for search_key, candidates in final_cognate_groups.items():
+            group_indices[search_key] = (current_index, current_index + len(candidates))
+            flat_cognate_list.extend(candidates)
+            current_index += len(candidates)
+        
+        # Log unique cognate statistics
+        total_unique_candidates = len(flat_cognate_list)
+        unique_search_words = len(final_cognate_groups)
+        
+        if total_unique_candidates > 0:
+            logger.info("Collected unique cognate candidates:")
+            for search_key, candidates in final_cognate_groups.items():
+                search_word = search_key[0]
+                cognate_words = [candidate[2] for candidate in candidates]
+                logger.info("  '%s' → [%s] (%d candidates)", search_word, ", ".join(f"'{w}'" for w in cognate_words), len(candidates))
+        
+        logger.info("Found %d unique search words with %d total unique cognate candidates for LLM validation", 
+                   unique_search_words, total_unique_candidates)
+        
+        # Validate all cognates in batch and reconstruct grouped results
+        if flat_cognate_list:
+            cognate_validation_results = self.validate_cognates_batch(flat_cognate_list, group_indices, final_cognate_groups)
+        else:
+            cognate_validation_results = {}
         
         # Process each sentence
         sentence_scores = []
