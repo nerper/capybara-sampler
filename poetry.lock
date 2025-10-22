@@ -2408,4 +2408,4 @@ mecab = ["ipadic (>=1.0.0,<2.0.0)", "mecab-ko-dic (>=1.0.0,<2.0.0)", "mecab-pyth
 [metadata]
 lock-version = "2.1"
 python-versions = "^3.10"
-content-hash = "45b1b3607d012e6ebfdc6313265c300a1616f178fce06e3f7fe9b41e2395d5c7"
+content-hash = "8947b9c0d0b4e089da89719384b8fffadf9197a5b50981d7e8b4a7838591b863"

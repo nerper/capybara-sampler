@@ -15,7 +15,9 @@ ISO_TO_STANZA_MAPPING = {
     "ita": "it",
     "eng": "en",
     "spa": "es", 
-    "fra": "fr"
+    "fra": "fr",
+    "por": "pt",
+    "deu": "de"
 }
 
 

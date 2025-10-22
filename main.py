@@ -2,6 +2,10 @@
 FastAPI application for word familiarity scoring.
 """
 
+# Load environment variables from .env file FIRST
+from dotenv import load_dotenv
+load_dotenv(override=True)
+
 import logging
 from contextlib import asynccontextmanager
 from typing import List

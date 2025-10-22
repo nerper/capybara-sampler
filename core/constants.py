@@ -29,17 +29,17 @@ Important considerations:
 For each pair, respond with only "true" or "false" (no field names, explanations, or additional text to save tokens)."""
 
 # Language codes
-SUPPORTED_LANGUAGES = {
-    "eng": "English",
-    "ita": "Italian", 
-    "spa": "Spanish"
-}
-
 # SUPPORTED_LANGUAGES = {
 #     "eng": "English",
 #     "ita": "Italian", 
-#     "spa": "Spanish",
-#     "fra": "French",
-#     "por": "Portuguese", 
-#     "deu": "German",
+#     "spa": "Spanish"
 # }
+
+SUPPORTED_LANGUAGES = {
+    "eng": "English",
+    "ita": "Italian", 
+    "spa": "Spanish",
+    "fra": "French",
+    "por": "Portuguese", 
+    "deu": "German",
+}

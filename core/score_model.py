@@ -9,13 +9,12 @@ from datetime import datetime
 import wordfreq
 import polars as pl
 from openai import OpenAI
-import asyncio
 import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor
 import json
 from difflib import SequenceMatcher
 import jellyfish
-from .constants import MIN_ZIPF, MAX_ZIPF, MIN_COGNATE_BOOST, MAX_COGNATE_BOOST, COGNET_PATH, TOP_LANGS, OPENAI_MODEL, COGNATE_VALIDATION_PROMPT, COGNATE_BATCH_SIZE
+from .constants import MIN_ZIPF, MAX_ZIPF, MIN_COGNATE_BOOST, MAX_COGNATE_BOOST, COGNET_PATH, TOP_LANGS, OPENAI_MODEL, COGNATE_BATCH_SIZE
 from .tokenizer import tokenizer, ISO_TO_STANZA_MAPPING
 
 logger = logging.getLogger(__name__)
@@ -55,9 +54,8 @@ class FamiliarityScorer:
         Returns:
             Dictionary mapping individual cognate pairs to validation results after LLM + similarity filtering
         """
-        if not self.openai_client or not flat_cognate_list:
-            # Default to accepting all pairs when OpenAI unavailable
-            return {pair: True for pair in flat_cognate_list}
+        if not flat_cognate_list:
+            return {}
         
         # Get LLM selection for all candidates in groups (LLM now directly selects best candidate)
         final_results = self._validate_cognate_groups_with_llm(flat_cognate_list, group_indices, cognate_groups)
@@ -103,8 +101,7 @@ class FamiliarityScorer:
                     logger.info("Completed grouped batch with %d pairs", len(batch))
                 except Exception as e:
                     logger.error("Grouped batch validation failed: %s", str(e))
-                    for pair in batch:
-                        all_results[pair] = True
+                    raise RuntimeError(f"LLM validation failed: {str(e)}") from e
         
         end_time = datetime.now()
         elapsed = (end_time - start_time).total_seconds()
@@ -261,7 +258,7 @@ class FamiliarityScorer:
             
         except Exception as e:
             logger.error("Grouped batch %d validation failed: %s", batch_idx, str(e))
-            return {pair: False for pair in cognate_batch}
+            raise RuntimeError(f"LLM batch validation failed: {str(e)}") from e
     
     def load_cognates_dataset(self):
         """Load and filter the cognates dataset for the top languages."""
