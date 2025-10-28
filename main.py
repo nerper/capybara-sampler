@@ -38,6 +38,7 @@ class TokenScore(BaseModel):
     cognate_before_LLM: str | None = Field(None, description="The cognate word found in dataset before LLM validation")
     cognate_after_LLM: str | None = Field(None, description="The cognate word in native language after LLM validation (null if rejected by LLM)")
     cognate_similarity: float | None = Field(None, description="Jaro-Winkler similarity score between search word and cognate (0-1), null if no cognate found")
+    entity: str | None = Field(None, description="Named entity type (PER, LOC, ORG, etc.) if token is part of a named entity, null otherwise")
 
 
 class SentenceScore(BaseModel):
@@ -220,6 +221,6 @@ if __name__ == "__main__":
         uvicorn.run(
             "main:app", 
             host="0.0.0.0", 
-            port=8000, 
+            port=7000, 
             reload=False
         )

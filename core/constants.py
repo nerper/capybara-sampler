@@ -32,7 +32,6 @@ For each pair, respond with only "true" or "false" (no field names, explanations
 # SUPPORTED_LANGUAGES = {
 #     "eng": "English",
 #     "ita": "Italian", 
-#     "spa": "Spanish"
 # }
 
 SUPPORTED_LANGUAGES = {
@@ -40,6 +39,5 @@ SUPPORTED_LANGUAGES = {
     "ita": "Italian", 
     "spa": "Spanish",
     "fra": "French",
-    "por": "Portuguese", 
     "deu": "German",
 }

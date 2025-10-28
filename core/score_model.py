@@ -80,8 +80,8 @@ class FamiliarityScorer:
                 batch_candidates.extend(cognate_groups[group_key])
             batches.append(batch_candidates)
         
-        logger.info("Processing %d cognate groups (%d total candidates) in %d batches of max %d groups each", 
-                   len(group_keys), len(flat_cognate_list), len(batches), batch_size)
+        logger.info("� Starting cognate validation for %d search words in %d batches (max %d words per batch)", 
+                   len(group_keys), len(batches), batch_size)
         
         all_results = {}
         start_time = datetime.now()
@@ -131,10 +131,14 @@ class FamiliarityScorer:
                     batch_by_groups[search_key] = []
                 batch_by_groups[search_key].append(candidate)
             
+            # Log exactly what this batch contains
+            logger.info("🔍 Processing batch %d: %d search words", 
+                       batch_idx + 1, len(batch_by_groups))
+            
             # Create language names mapping
             lang_names = {
                 'eng': 'English', 'spa': 'Spanish', 'fra': 'French', 
-                'ita': 'Italian', 'por': 'Portuguese', 'deu': 'German'
+                'ita': 'English', 'por': 'Portuguese', 'deu': 'German'
             }
             
             for search_key, group_candidates in batch_by_groups.items():
@@ -489,10 +493,11 @@ class FamiliarityScorer:
         Compute familiarity scores for a single token.
         
         Args:
-            token_info: Dictionary with token information (text, pos)
+            token_info: Dictionary with token information (text, pos, lemma, entity)
             learning_lang: Learning language code
             native_lang: Native language code
             cognate_validation_results: Dictionary with validation results from OpenAI
+            pre_llm_candidates: Dictionary with pre-LLM cognate candidates for display purposes
             
         Returns:
             Dictionary with token and computed scores
@@ -501,9 +506,24 @@ class FamiliarityScorer:
         original_text = token_info['text']
         word = original_text.lower()
         stanza_pos = token_info.get('pos')
+        entity = token_info.get('entity')
         
-        logger.debug("Processing token: '%s' (pos: %s) -> word: '%s'", 
-                    original_text, stanza_pos or 'unknown', word)
+        logger.debug("Processing token: '%s' (pos: %s, entity: %s) -> word: '%s'", 
+                    original_text, stanza_pos or 'unknown', entity or 'None', word)
+        
+        # If this token is part of a named entity, set familiarity score to 1.0
+        if entity:
+            logger.debug("Token '%s' is a NER entity (%s) - setting familiarity score to 1.0", 
+                        original_text, entity)
+            return {
+                'text': original_text,
+                'familiarity_score': 1.0,
+                'cognate_boosted_familiarity_score': None,
+                'cognate_before_LLM': None,
+                'cognate_after_LLM': None,
+                'cognate_similarity': None,
+                'entity': entity
+            }
         
         # Get frequency score using the word directly
         freq_start = datetime.now()
@@ -601,7 +621,8 @@ class FamiliarityScorer:
             'cognate_boosted_familiarity_score': round(cognate_boosted_familiarity_score, 3) if cognate_boosted_familiarity_score is not None else None,
             'cognate_before_LLM': cognate_before_LLM,
             'cognate_after_LLM': cognate_after_LLM,
-            'cognate_similarity': round(cognate_similarity, 3) if cognate_similarity is not None else None
+            'cognate_similarity': round(cognate_similarity, 3) if cognate_similarity is not None else None,
+            'entity': entity
         }
         result_prep_end = datetime.now()
         
@@ -644,6 +665,13 @@ class FamiliarityScorer:
             sentence_text = sentence_data['text']
             for token_info in sentence_data['tokens']:
                 stanza_pos = token_info.get('pos', 'unknown')
+                entity = token_info.get('entity')
+                
+                # Skip entity tokens - they get familiarity score 1.0 and don't need cognate processing
+                if entity:
+                    logger.debug("Skipping entity token '%s' (%s) from cognate processing", 
+                               token_info['text'], entity)
+                    continue
                 
                 if stanza_pos in cognate_eligible_pos and stanza_pos != 'PUNCT':
                     word = token_info['text'].lower()
@@ -699,6 +727,11 @@ class FamiliarityScorer:
                                        stanza_pos, concept_pos, search_word, 
                                        cognate_row['word 1'] if cognate_row['lang 1'].lower() == native_language.lower() else cognate_row['word 2'])
                             continue  # Skip this candidate due to POS mismatch
+                        else:
+                            # Log POS match
+                            logger.info("POS match: Stanza '%s' = Concept '%s' for '%s' -> '%s', including", 
+                                        stanza_pos, concept_pos, search_word, 
+                                        cognate_row['word 1'] if cognate_row['lang 1'].lower() == native_language.lower() else cognate_row['word 2'])
                     
                     if cognate_row['lang 1'].lower() == native_language.lower():
                         candidate_cognate = cognate_row['word 1']
