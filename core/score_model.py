@@ -2,33 +2,43 @@
 Core scoring model for computing familiarity scores based on word frequency.
 """
 
+import concurrent.futures
+import json
 import logging
 import os
-from typing import List, Dict, Optional
-from datetime import datetime
-import wordfreq
-import polars as pl
-from openai import OpenAI
-import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor
-import json
+from datetime import datetime
 from difflib import SequenceMatcher
+
 import jellyfish
-from .constants import MIN_ZIPF, MAX_ZIPF, MIN_COGNATE_BOOST, MAX_COGNATE_BOOST, COGNET_PATH, TOP_LANGS, OPENAI_MODEL, COGNATE_BATCH_SIZE
-from .tokenizer import tokenizer, ISO_TO_STANZA_MAPPING
+import polars as pl
+import wordfreq
+from openai import OpenAI
+
+from .constants import (
+    COGNATE_BATCH_SIZE,
+    COGNET_PATH,
+    MAX_COGNATE_BOOST,
+    MAX_ZIPF,
+    MIN_COGNATE_BOOST,
+    MIN_ZIPF,
+    OPENAI_MODEL,
+    TOP_LANGS,
+)
+from .tokenizer import ISO_TO_STANZA_MAPPING, tokenizer
 
 logger = logging.getLogger(__name__)
 
 
 class FamiliarityScorer:
     """Computes familiarity scores for tokens using frequency and cognate data."""
-    
+
     def __init__(self):
         self.cognates_df = None
         self.filtered_cognates_df = None
         self.openai_client = None
         self._init_openai_client()
-    
+
     def _init_openai_client(self):
         """Initialize OpenAI client if API key is available."""
         api_key = os.getenv('OPENAI_API_KEY')
@@ -41,28 +51,28 @@ class FamiliarityScorer:
                 self.openai_client = None
         else:
             logger.warning("OPENAI_API_KEY not found - cognate validation will be skipped")
-    
-    def validate_cognates_batch(self, flat_cognate_list: List[tuple], group_indices: Dict, cognate_groups: Dict) -> Dict[tuple, bool]:
+
+    def validate_cognates_batch(self, flat_cognate_list: list[tuple], group_indices: dict, cognate_groups: dict) -> dict[tuple, bool]:
         """
         Validate cognate groups using OpenAI with nested array responses.
-        
+
         Args:
             flat_cognate_list: Flattened list of all cognate candidates
             group_indices: Mapping of search_key to (start_idx, end_idx) in flat list
             cognate_groups: Original grouped cognate data
-            
+
         Returns:
             Dictionary mapping individual cognate pairs to validation results after LLM + similarity filtering
         """
         if not flat_cognate_list:
             return {}
-        
+
         # Get LLM selection for all candidates in groups (LLM now directly selects best candidate)
         final_results = self._validate_cognate_groups_with_llm(flat_cognate_list, group_indices, cognate_groups)
-        
+
         return final_results
-    
-    def _validate_cognate_groups_with_llm(self, flat_cognate_list: List[tuple], group_indices: Dict, cognate_groups: Dict) -> Dict[tuple, bool]:
+
+    def _validate_cognate_groups_with_llm(self, flat_cognate_list: list[tuple], group_indices: dict, cognate_groups: dict) -> dict[tuple, bool]:
         """
         Send cognate groups to LLM and get nested array responses.
         Batches by groups (search words), not individual cognate pairs.
@@ -71,7 +81,7 @@ class FamiliarityScorer:
         batch_size = COGNATE_BATCH_SIZE  # Max groups per batch
         group_keys = list(cognate_groups.keys())
         group_batches = [group_keys[i:i + batch_size] for i in range(0, len(group_keys), batch_size)]
-        
+
         # Convert group batches back to flat cognate lists for processing
         batches = []
         for group_batch in group_batches:
@@ -79,20 +89,20 @@ class FamiliarityScorer:
             for group_key in group_batch:
                 batch_candidates.extend(cognate_groups[group_key])
             batches.append(batch_candidates)
-        
-        logger.info("� Starting cognate validation for %d search words in %d batches (max %d words per batch)", 
+
+        logger.info("� Starting cognate validation for %d search words in %d batches (max %d words per batch)",
                    len(group_keys), len(batches), batch_size)
-        
+
         all_results = {}
         start_time = datetime.now()
         max_concurrent = min(len(batches), 4)
-        
+
         with ThreadPoolExecutor(max_workers=max_concurrent) as executor:
             future_to_batch = {
-                executor.submit(self._validate_single_batch_grouped, batch, batch_idx, group_indices, cognate_groups): batch 
+                executor.submit(self._validate_single_batch_grouped, batch, batch_idx, group_indices, cognate_groups): batch
                 for batch_idx, batch in enumerate(batches)
             }
-            
+
             for future in concurrent.futures.as_completed(future_to_batch):
                 batch = future_to_batch[future]
                 try:
@@ -102,14 +112,14 @@ class FamiliarityScorer:
                 except Exception as e:
                     logger.error("Grouped batch validation failed: %s", str(e))
                     raise RuntimeError(f"LLM validation failed: {str(e)}") from e
-        
+
         end_time = datetime.now()
         elapsed = (end_time - start_time).total_seconds()
-        logger.info("Completed grouped LLM validation of %d cognate candidates in %.2f seconds", 
+        logger.info("Completed grouped LLM validation of %d cognate candidates in %.2f seconds",
                    len(all_results), elapsed)
         return all_results
-    
-    def _validate_single_batch_grouped(self, cognate_batch: List[tuple], batch_idx: int, group_indices: Dict, cognate_groups: Dict) -> Dict[tuple, bool]:
+
+    def _validate_single_batch_grouped(self, cognate_batch: list[tuple], batch_idx: int, group_indices: dict, cognate_groups: dict) -> dict[tuple, bool]:
         """
         Validate a single batch with grouped cognate structure for LLM.
         This will request nested arrays like [[true,false], [true], [false,true,false]]
@@ -118,44 +128,44 @@ class FamiliarityScorer:
             # Build prompt showing grouped structure
             group_prompts = []
             group_counter = 1
-            
+
             # We need to organize this batch by groups for the prompt
             batch_by_groups = {}
             for candidate in cognate_batch:
                 search_word = candidate[0]
-                learning_lang = candidate[1] 
+                learning_lang = candidate[1]
                 native_lang = candidate[3]
                 search_key = (search_word, learning_lang, native_lang)
-                
+
                 if search_key not in batch_by_groups:
                     batch_by_groups[search_key] = []
                 batch_by_groups[search_key].append(candidate)
-            
+
             # Log exactly what this batch contains
-            logger.info("🔍 Processing batch %d: %d search words", 
+            logger.info("🔍 Processing batch %d: %d search words",
                        batch_idx + 1, len(batch_by_groups))
-            
+
             # Create language names mapping
             lang_names = {
-                'eng': 'English', 'spa': 'Spanish', 'fra': 'French', 
-                'ita': 'English', 'por': 'Portuguese', 'deu': 'German'
+                'eng': 'English', 'spa': 'Spanish', 'fra': 'French',
+                'ita': 'Italian', 'deu': 'German'
             }
-            
+
             for search_key, group_candidates in batch_by_groups.items():
                 search_word, learning_lang, native_lang = search_key
                 lang1_name = lang_names.get(learning_lang, learning_lang)
                 lang2_name = lang_names.get(native_lang, native_lang)
-                
+
                 cognate_list = [f'"{candidate[2]}"' for candidate in group_candidates]
                 context = group_candidates[0][4]  # Use first sentence as context
-                
+
                 group_prompts.append(
                     f'{group_counter}. "{search_word}" ({lang1_name}) → [{", ".join(cognate_list)}] ({lang2_name}) - Context: "{context}"'
                 )
                 group_counter += 1
-            
+
             user_prompt = '\n'.join(group_prompts)
-            
+
             response = self.openai_client.chat.completions.create(
                 model=OPENAI_MODEL,
                 messages=[
@@ -165,15 +175,15 @@ class FamiliarityScorer:
                 max_tokens=len(cognate_batch) * 10,
                 temperature=0
             )
-            
+
             raw_response = response.choices[0].message.content
             if raw_response:
                 raw_response = raw_response.strip()
             else:
                 raise ValueError("Empty response from OpenAI")
-            
+
             # Raw response will be processed and logged in summary below
-            
+
             # Extract JSON from markdown code blocks if present
             json_content = raw_response
             if "```json" in raw_response:
@@ -191,7 +201,7 @@ class FamiliarityScorer:
                 if len(parts) >= 2:
                     json_content = parts[1].strip()
                     logger.info("Extracted JSON from code block: %s", json_content)
-            
+
             # Parse the JSON response (array of strings)
             try:
                 string_response = json.loads(json_content)
@@ -204,15 +214,15 @@ class FamiliarityScorer:
                 # Fallback to rejecting all
                 logger.error("CRITICAL: Falling back to rejecting all pairs due to parse failure!")
                 return {pair: False for pair in cognate_batch}
-            
+
             # Map string results back to individual candidates
             results = {}
             group_idx = 0
-            
-            for search_key, group_candidates in batch_by_groups.items():
+
+            for _, group_candidates in batch_by_groups.items():
                 if group_idx < len(string_response):
                     selected_cognate = string_response[group_idx].strip()
-                    
+
                     if selected_cognate == "":
                         # LLM rejected all candidates for this group
                         for candidate in group_candidates:
@@ -228,42 +238,42 @@ class FamiliarityScorer:
                     # Missing group results - default to reject
                     for candidate in group_candidates:
                         results[candidate] = False
-                
+
                 group_idx += 1
-            
+
             # Handle any remaining candidates not covered (default to reject)
             for candidate in cognate_batch:
                 if candidate not in results:
                     results[candidate] = False
-            
+
             # Log consolidated LLM validation results
             logger.info("LLM Selection Results - Batch %d:", batch_idx)
             group_idx = 0
             for search_key, group_candidates in batch_by_groups.items():
                 search_word = search_key[0]
                 context_phrase = group_candidates[0][4] if group_candidates else ""  # Get context from first candidate
-                
+
                 # Find which candidate was selected (if any)
                 selected_candidate = None
                 for candidate in group_candidates:
                     if results.get(candidate, False):
                         selected_candidate = candidate[2]  # The cognate word
                         break
-                
+
                 if selected_candidate:
                     logger.info("  \"%s\" | '%s' → SELECTED: '%s'", context_phrase, search_word, selected_candidate)
                 else:
                     candidates_list = [candidate[2] for candidate in group_candidates]
                     logger.info("  \"%s\" | '%s' → REJECTED: [%s]", context_phrase, search_word, ", ".join(candidates_list))
-                
+
                 group_idx += 1
-            
+
             return results
-            
+
         except Exception as e:
             logger.error("Grouped batch %d validation failed: %s", batch_idx, str(e))
             raise RuntimeError(f"LLM batch validation failed: {str(e)}") from e
-    
+
     def load_cognates_dataset(self):
         """Load and filter the cognates dataset for the top languages."""
         try:
@@ -274,19 +284,19 @@ class FamiliarityScorer:
                 has_header=True,
                 low_memory=True,
             )
-            
+
             logger.info(f"Loaded {self.cognates_df.shape[0]:,} cognate rows")
-            
+
             # Pre-filter for top languages
             self.filtered_cognates_df = self.cognates_df.filter(
                 (self.cognates_df["lang 1"].is_in(TOP_LANGS)) & (self.cognates_df["lang 2"].is_in(TOP_LANGS))
             )
             logger.info(f"Subset size after filtering: {self.filtered_cognates_df.shape[0]:,} rows")
-            
+
         except Exception as e:
             logger.error("Failed to load cognates dataset: %s", str(e))
             raise RuntimeError(f"Could not load cognates dataset: {str(e)}") from e
-    
+
     def find_cognates(self, word: str, learning_language: str, native_language: str) -> pl.DataFrame:
         """
         Find cognates for a given word from learning_language to native_language within the top languages subset.
@@ -294,7 +304,7 @@ class FamiliarityScorer:
         """
         if self.filtered_cognates_df is None:
             return pl.DataFrame()
-        
+
         word = word.lower()
         learning_language = learning_language.lower()
         native_language = native_language.lower()
@@ -323,52 +333,52 @@ class FamiliarityScorer:
                 "translit 2",
             ]
         )
-    
+
     def _calculate_cognate_similarity(self, word1: str, word2: str) -> float:
         """
         Calculate similarity score between two words for cognate disambiguation.
         Uses string similarity to prioritize more similar cognates.
-        
+
         Args:
             word1: First word to compare
             word2: Second word to compare
-            
+
         Returns:
             Similarity score between 0 and 1 (1 being identical)
         """
         # Normalize words to lowercase for comparison
         word1 = word1.lower().strip()
         word2 = word2.lower().strip()
-        
+
         # Use SequenceMatcher for similarity scoring
         similarity = SequenceMatcher(None, word1, word2).ratio()
-        
+
         return similarity
-    
-    def _search_cognates_concurrently(self, unique_search_requests: Dict, learning_language: str, native_language: str) -> Dict:
+
+    def _search_cognates_concurrently(self, unique_search_requests: dict, learning_language: str, native_language: str) -> dict:
         """
         Perform concurrent cognate searches for all unique search requests.
-        
+
         Args:
             unique_search_requests: Dict mapping search_key to (search_word, stanza_pos, sentence_context)
             learning_language: Learning language code
             native_language: Native language code
-            
+
         Returns:
             Dict mapping search_key to cognate search results (Polars DataFrame)
         """
         if not unique_search_requests:
             return {}
-        
+
         # Determine optimal number of workers
         max_workers = min(len(unique_search_requests), os.cpu_count() or 4, 8)
-        
-        logger.info("🔍 Starting concurrent cognate search with %d workers for %d search terms", 
+
+        logger.info("🔍 Starting concurrent cognate search with %d workers for %d search terms",
                    max_workers, len(unique_search_requests))
-        
+
         cognate_results = {}
         search_items = list(unique_search_requests.items())
-        
+
         def search_single_cognate(item):
             """Search cognates for a single search request."""
             search_key, (search_word, stanza_pos, sentence_context) = item
@@ -377,24 +387,24 @@ class FamiliarityScorer:
                 cognates = self.find_cognates(search_word, learning_language, native_language)
                 search_end = datetime.now()
                 search_time_ms = (search_end - search_start).total_seconds() * 1000
-                
-                logger.debug("🔍 Concurrent search for '%s': %.3f ms, found %d results", 
+
+                logger.debug("🔍 Concurrent search for '%s': %.3f ms, found %d results",
                            search_word, search_time_ms, len(cognates))
-                
+
                 return search_key, cognates
             except Exception as e:
                 logger.error("Error searching cognates for '%s': %s", search_word, str(e))
                 return search_key, pl.DataFrame()
-        
+
         # Execute searches concurrently
         concurrent_start = datetime.now()
-        
+
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             future_to_search = {
-                executor.submit(search_single_cognate, item): item 
+                executor.submit(search_single_cognate, item): item
                 for item in search_items
             }
-            
+
             for future in concurrent.futures.as_completed(future_to_search):
                 item = future_to_search[future]
                 try:
@@ -404,80 +414,80 @@ class FamiliarityScorer:
                     search_key = item[0]
                     logger.error("Concurrent cognate search failed for %s: %s", search_key, str(e))
                     cognate_results[search_key] = pl.DataFrame()
-        
+
         concurrent_end = datetime.now()
         total_time = (concurrent_end - concurrent_start).total_seconds()
-        
+
         # Calculate statistics
         total_results = sum(len(df) for df in cognate_results.values())
         searches_with_results = sum(1 for df in cognate_results.values() if len(df) > 0)
-        
+
         logger.info("✅ Concurrent cognate search completed: %d searches in %.3f seconds (%.1f searches/sec), "
-                   "%d total results, %d searches found cognates", 
+                   "%d total results, %d searches found cognates",
                    len(cognate_results), total_time, len(cognate_results) / total_time if total_time > 0 else 0,
                    total_results, searches_with_results)
-        
+
         return cognate_results
-    
-    def _select_best_cognate_post_llm(self, validated_candidates: List[tuple], search_word: str) -> tuple:
+
+    def _select_best_cognate_post_llm(self, validated_candidates: list[tuple], search_word: str) -> tuple:
         """
         Select the best cognate from LLM-validated candidates using similarity scoring.
         This method only runs AFTER LLM validation, not before.
-        
+
         Args:
             validated_candidates: List of LLM-validated cognate tuples
             search_word: The original word we're searching cognates for
-            
+
         Returns:
             Best cognate tuple based on similarity
         """
         if len(validated_candidates) == 1:
             return validated_candidates[0]
-        
+
         # Calculate similarities for validated candidates
         similarities = []
         for candidate in validated_candidates:
             cognate_word = candidate[2]  # The cognate word
             similarity = self._calculate_cognate_similarity(search_word, cognate_word)
             similarities.append((candidate, similarity))
-        
+
         # Sort by similarity (highest first)
         similarities.sort(key=lambda x: x[1], reverse=True)
-        
-        # Log disambiguation decision  
+
+        # Log disambiguation decision
         logger.info("Post-LLM similarity disambiguation for '%s' (%d valid candidates):", search_word, len(validated_candidates))
         for i, (candidate, similarity) in enumerate(similarities[:3]):  # Show top 3
             cognate_word = candidate[2]
             marker = " ← SELECTED" if i == 0 else ""
             logger.info("  %d. '%s' (similarity: %.3f)%s", i + 1, cognate_word, similarity, marker)
-        
+
         return similarities[0][0]  # Return best candidate
-    
+
     def normalize_frequency(self, zipf_score: float) -> float:
         """
         Normalize Zipf frequency score to [0,1] range.
-        
+
         Args:
             zipf_score: Raw Zipf frequency score from wordfreq
-            
+
         Returns:
             Normalized frequency score between 0 and 1
         """
         if zipf_score <= 0:
             return 0.0
-        
+
         # Clamp to MIN_ZIPF and MAX_ZIPF range and normalize
         clamped_score = max(min(zipf_score, MAX_ZIPF), MIN_ZIPF)
         return (clamped_score - MIN_ZIPF) / (MAX_ZIPF - MIN_ZIPF)
-    
+
     def get_frequency_score(self, word: str, language: str) -> tuple[float, float]:
         """
         Get normalized frequency score for a word.
-        
+
         Args:
             word: The word to score
             language: 3-letter ISO language code
-            
+
         Returns:
             Tuple of (normalized frequency score, raw zipf score)
         """
@@ -487,18 +497,18 @@ class FamiliarityScorer:
         normalized = self.normalize_frequency(zipf_score)
         logger.debug("Word '%s' (%s): zipf=%.3f, normalized=%.3f", word, wordfreq_lang, zipf_score, normalized)
         return normalized, zipf_score
-    
-    def compute_token_scores(self, token_info: dict, learning_lang: str, native_lang: str, cognate_validation_results: Optional[Dict] = None, pre_llm_candidates: Optional[Dict] = None) -> dict:
+
+    def compute_token_scores(self, token_info: dict, learning_lang: str, native_lang: str, cognate_validation_results: dict | None = None, pre_llm_candidates: dict | None = None) -> dict:
         """
         Compute familiarity scores for a single token.
-        
+
         Args:
             token_info: Dictionary with token information (text, pos, lemma, entity)
             learning_lang: Learning language code
             native_lang: Native language code
             cognate_validation_results: Dictionary with validation results from OpenAI
             pre_llm_candidates: Dictionary with pre-LLM cognate candidates for display purposes
-            
+
         Returns:
             Dictionary with token and computed scores
         """
@@ -507,13 +517,13 @@ class FamiliarityScorer:
         word = original_text.lower()
         stanza_pos = token_info.get('pos')
         entity = token_info.get('entity')
-        
-        logger.debug("Processing token: '%s' (pos: %s, entity: %s) -> word: '%s'", 
+
+        logger.debug("Processing token: '%s' (pos: %s, entity: %s) -> word: '%s'",
                     original_text, stanza_pos or 'unknown', entity or 'None', word)
-        
+
         # If this token is part of a named entity, set familiarity score to 1.0
         if entity:
-            logger.debug("Token '%s' is a NER entity (%s) - setting familiarity score to 1.0", 
+            logger.debug("Token '%s' is a NER entity (%s) - setting familiarity score to 1.0",
                         original_text, entity)
             return {
                 'text': original_text,
@@ -524,16 +534,16 @@ class FamiliarityScorer:
                 'cognate_similarity': None,
                 'entity': entity
             }
-        
+
         # Get frequency score using the word directly
         freq_start = datetime.now()
         freq_score, zipf_score = self.get_frequency_score(word, learning_lang)
         freq_end = datetime.now()
         logger.debug("⏱️  Frequency lookup for '%s': %.3f ms", word, (freq_end - freq_start).total_seconds() * 1000)
-        
+
         # Compute familiarity score
         familiarity_score = freq_score
-        
+
         # Check for cognates and apply boost if found
         # Only check cognates for nouns, verbs, adverbs, and adjectives
         cognate_processing_start = datetime.now()
@@ -541,12 +551,12 @@ class FamiliarityScorer:
         cognate_after_LLM = None
         cognate_boosted_familiarity_score = None
         cognate_similarity = None
-        
+
         cognate_eligible_pos = {'NOUN', 'VERB', 'ADV', 'ADJ'}
-        
-        if (self.filtered_cognates_df is not None and 
+
+        if (self.filtered_cognates_df is not None and
             stanza_pos in cognate_eligible_pos):
-            
+
             # Use lemma (base form) for cognate search only for nouns and adjectives, otherwise use the word
             if (stanza_pos == 'NOUN' or stanza_pos == 'ADJ') and token_info.get('lemma'):
                 lemma = token_info.get('lemma')
@@ -554,7 +564,7 @@ class FamiliarityScorer:
                 logger.debug("Using lemma '%s' for %s cognate search (original: '%s')", search_word, stanza_pos.lower(), word)
             else:
                 search_word = word
-            
+
             # Look up pre-LLM candidates for this search word
             search_key = (search_word, learning_lang, native_lang)
             if pre_llm_candidates and search_key in pre_llm_candidates:
@@ -564,55 +574,55 @@ class FamiliarityScorer:
                     cognate_before_LLM = pre_llm_candidate_list[0]
                 else:
                     cognate_before_LLM = ", ".join(pre_llm_candidate_list)
-                logger.debug("Found %d pre-LLM candidates for '%s': %s", 
+                logger.debug("Found %d pre-LLM candidates for '%s': %s",
                            len(pre_llm_candidate_list), search_word, cognate_before_LLM)
-            
+
             # Just check if this word has any validated cognates from our pre-computed results
             candidate_cognate = None
             is_valid_cognate = False
-            
+
             if cognate_validation_results is not None:
                 validation_lookup_start = datetime.now()
                 # Look for any validated cognate for this search_word
-                logger.debug("Looking for validated cognates for search_word='%s', learning_lang='%s', native_lang='%s'", 
+                logger.debug("Looking for validated cognates for search_word='%s', learning_lang='%s', native_lang='%s'",
                            search_word, learning_lang, native_lang)
-                
+
                 for pair_key, validation_result in cognate_validation_results.items():
-                    if (pair_key[0] == search_word and 
-                        pair_key[1].lower() == learning_lang.lower() and 
+                    if (pair_key[0] == search_word and
+                        pair_key[1].lower() == learning_lang.lower() and
                         pair_key[3].lower() == native_lang.lower() and
                         validation_result):  # Only use if actually validated as true
                         candidate_cognate = pair_key[2]  # The pre-selected cognate
                         is_valid_cognate = True
                         logger.debug("Found validated cognate: '%s' -> '%s'", search_word, candidate_cognate)
                         break
-                
+
                 validation_lookup_end = datetime.now()
                 logger.debug("⏱️  Validation lookup for '%s': %.3f ms", search_word, (validation_lookup_end - validation_lookup_start).total_seconds() * 1000)
-            
+
             # Apply cognate boost if we found a valid one
             if candidate_cognate and is_valid_cognate:
                 # cognate_before_LLM is already set above from pre_llm_candidates
                 cognate_after_LLM = candidate_cognate
-                
+
                 # Calculate Jaro-Winkler similarity between search word and cognate
                 cognate_similarity = jellyfish.jaro_winkler(search_word, candidate_cognate)
-                
+
                 # Modulate cognate boost based on similarity (0 = MIN_COGNATE_BOOST, 1 = MAX_COGNATE_BOOST)
                 cognate_boost = MIN_COGNATE_BOOST + (cognate_similarity * (MAX_COGNATE_BOOST - MIN_COGNATE_BOOST))
                 cognate_boosted_familiarity_score = min(1.0, familiarity_score + cognate_boost)
-                
-                logger.debug("Valid cognate confirmed for '%s' [%s]: '%s', similarity=%.3f, boost=%.3f, %.3f -> %.3f", 
+
+                logger.debug("Valid cognate confirmed for '%s' [%s]: '%s', similarity=%.3f, boost=%.3f, %.3f -> %.3f",
                            word, stanza_pos, cognate_after_LLM, cognate_similarity, cognate_boost, familiarity_score, cognate_boosted_familiarity_score)
             else:
                 logger.debug("No validated cognates found for '%s' (%s->%s)", search_word, learning_lang, native_lang)
         else:
             if stanza_pos not in cognate_eligible_pos:
                 logger.debug("Skipping cognate check for '%s' [%s]: POS not eligible", word, stanza_pos)
-        
+
         cognate_processing_end = datetime.now()
         logger.debug("⏱️  Cognate processing for '%s': %.3f ms", word, (cognate_processing_end - cognate_processing_start).total_seconds() * 1000)
-        
+
         # Prepare result
         result_prep_start = datetime.now()
         result = {
@@ -625,54 +635,54 @@ class FamiliarityScorer:
             'entity': entity
         }
         result_prep_end = datetime.now()
-        
+
         token_end = datetime.now()
-        logger.debug("⏱️  Token '%s' total processing: %.3f ms (result prep: %.3f ms)", 
+        logger.debug("⏱️  Token '%s' total processing: %.3f ms (result prep: %.3f ms)",
                     word, (token_end - token_start).total_seconds() * 1000,
                     (result_prep_end - result_prep_start).total_seconds() * 1000)
-        
-        logger.debug("Token '%s' [POS:%s]: zipf=%.3f, familiarity_score=%.3f, cognate_before='%s', cognate_after='%s', cognate_boosted=%s", 
-                    original_text, stanza_pos or 'unknown', zipf_score, 
+
+        logger.debug("Token '%s' [POS:%s]: zipf=%.3f, familiarity_score=%.3f, cognate_before='%s', cognate_after='%s', cognate_boosted=%s",
+                    original_text, stanza_pos or 'unknown', zipf_score,
                     result['familiarity_score'], cognate_before_LLM or 'None', cognate_after_LLM or 'None',
                     result['cognate_boosted_familiarity_score'] or 'None')
-        
+
         return result
-    
+
     def compute_document_familiarity(self, document: str, learning_language: str, native_language: str) -> dict:
         """
         Compute familiarity scores for all sentences and tokens in a document.
-        
+
         Args:
             document: Input document text to analyze
             learning_language: Target language code
             native_language: Native language code
-            
+
         Returns:
             Dictionary with document analysis and sentence/token scores
         """
         document_start = datetime.now()
         logger.info("🚀 Starting document familiarity computation for %s -> %s", learning_language, native_language)
-        
+
         # Tokenize the document into sentences
         sentences_data = tokenizer.tokenize_document(document, learning_language)
         logger.info("Document sentence-wise tokenization complete - processing %d sentences", len(sentences_data))
-        
+
         # First pass: collect all unique search words that need cognate lookup
         cognate_eligible_pos = {'NOUN', 'VERB', 'ADV', 'ADJ'}
         unique_search_requests = {}  # Dict[search_key, (search_word, stanza_pos, sentence_context)]
-        
+
         for sentence_data in sentences_data:
             sentence_text = sentence_data['text']
             for token_info in sentence_data['tokens']:
                 stanza_pos = token_info.get('pos', 'unknown')
                 entity = token_info.get('entity')
-                
+
                 # Skip entity tokens - they get familiarity score 1.0 and don't need cognate processing
                 if entity:
-                    logger.debug("Skipping entity token '%s' (%s) from cognate processing", 
+                    logger.debug("Skipping entity token '%s' (%s) from cognate processing",
                                token_info['text'], entity)
                     continue
-                
+
                 if stanza_pos in cognate_eligible_pos and stanza_pos != 'PUNCT':
                     word = token_info['text'].lower()
                     # Use lemma (base form) for cognate search only for nouns and adjectives
@@ -680,34 +690,34 @@ class FamiliarityScorer:
                         search_word = token_info.get('lemma').lower()
                     else:
                         search_word = word
-                    
+
                     search_key = (search_word, learning_language, native_language)
                     if search_key not in unique_search_requests:
                         unique_search_requests[search_key] = (search_word, stanza_pos, sentence_text)
-        
+
         logger.info("🔍 Starting concurrent cognate search for %d unique search terms", len(unique_search_requests))
-        
+
         # Concurrent cognate search phase
         cognate_search_start = datetime.now()
         cognate_search_results = self._search_cognates_concurrently(unique_search_requests, learning_language, native_language)
         cognate_search_end = datetime.now()
         logger.info("✅ Concurrent cognate search completed in %.3f seconds", (cognate_search_end - cognate_search_start).total_seconds())
-        
+
         # Process search results to build cognate groups
         cognate_groups = {}  # Dict[search_word_key, Set[cognate_candidates]]
         cognate_contexts = {}  # Dict[search_word_key, sentence_context]
-        
+
         for search_key, (search_word, stanza_pos, sentence_context) in unique_search_requests.items():
             cognates = cognate_search_results.get(search_key, pl.DataFrame())
-            
+
             if len(cognates) > 0:
                 cognate_groups[search_key] = set()  # Use set to ensure uniqueness
                 cognate_contexts[search_key] = sentence_context  # Store the actual sentence context
-                
+
                 # Add ALL unique cognate candidates for this search word with POS filtering
                 for i in range(len(cognates)):
                     cognate_row = cognates.row(i, named=True)
-                    
+
                     # Get concept ID and extract POS from first letter
                     concept_id = cognate_row.get('concept id', '')
                     if concept_id:
@@ -715,33 +725,33 @@ class FamiliarityScorer:
                         # Map concept ID first letter to POS categories
                         concept_pos_mapping = {
                             'n': 'NOUN',
-                            'v': 'VERB', 
+                            'v': 'VERB',
                             'a': 'ADJ',
                             'r': 'ADV'
                         }
                         concept_pos = concept_pos_mapping.get(concept_pos_letter)
-                        
+
                         # Check POS compatibility
                         if concept_pos and concept_pos != stanza_pos:
-                            logger.info("POS mismatch: Stanza '%s' vs Concept '%s' for '%s' -> '%s', skipping", 
-                                       stanza_pos, concept_pos, search_word, 
+                            logger.info("POS mismatch: Stanza '%s' vs Concept '%s' for '%s' -> '%s', skipping",
+                                       stanza_pos, concept_pos, search_word,
                                        cognate_row['word 1'] if cognate_row['lang 1'].lower() == native_language.lower() else cognate_row['word 2'])
                             continue  # Skip this candidate due to POS mismatch
                         else:
                             # Log POS match
-                            logger.info("POS match: Stanza '%s' = Concept '%s' for '%s' -> '%s', including", 
-                                        stanza_pos, concept_pos, search_word, 
+                            logger.info("POS match: Stanza '%s' = Concept '%s' for '%s' -> '%s', including",
+                                        stanza_pos, concept_pos, search_word,
                                         cognate_row['word 1'] if cognate_row['lang 1'].lower() == native_language.lower() else cognate_row['word 2'])
-                    
+
                     if cognate_row['lang 1'].lower() == native_language.lower():
                         candidate_cognate = cognate_row['word 1']
                     else:
                         candidate_cognate = cognate_row['word 2']
-                    
+
                     # Create tuple for LLM validation (no sentence context for uniqueness)
                     cognate_candidate = (search_word, learning_language, candidate_cognate, native_language)
                     cognate_groups[search_key].add(cognate_candidate)
-        
+
         # Convert sets to lists and add actual sentence context for LLM validation
         final_cognate_groups = {}
         for search_key, unique_candidates in cognate_groups.items():
@@ -757,30 +767,30 @@ class FamiliarityScorer:
                 # Log when a search word has no candidates after POS filtering
                 search_word = search_key[0]
                 logger.info("No cognate candidates for '%s' after POS filtering - skipping LLM validation", search_word)
-        
+
         # Flatten groups for batch validation
         flat_cognate_list = []
         group_indices = {}  # Map to reconstruct groups from flat results
         current_index = 0
-        
+
         for search_key, candidates in final_cognate_groups.items():
             group_indices[search_key] = (current_index, current_index + len(candidates))
             flat_cognate_list.extend(candidates)
             current_index += len(candidates)
-        
+
         # Log summary statistics with POS filtering info
         total_unique_candidates = len(flat_cognate_list)
         unique_search_words = len(final_cognate_groups)
-        
-        logger.info("Found %d unique search words with %d total unique cognate candidates for LLM validation (after POS filtering)", 
+
+        logger.info("Found %d unique search words with %d total unique cognate candidates for LLM validation (after POS filtering)",
                    unique_search_words, total_unique_candidates)
-        
+
         # Build pre-LLM candidate lookup for cognate_before_LLM field
         pre_llm_candidates = {}  # Dict[search_key, List[candidate_cognate_words]]
         for search_key, candidates in final_cognate_groups.items():
             candidate_words = [candidate[2] for candidate in candidates]  # Extract cognate words
             pre_llm_candidates[search_key] = candidate_words
-        
+
         # Validate all cognates in batch and reconstruct grouped results
         llm_validation_start = datetime.now()
         if flat_cognate_list:
@@ -788,40 +798,36 @@ class FamiliarityScorer:
         else:
             cognate_validation_results = {}
         llm_validation_end = datetime.now()
-        
+
         logger.info("✅ LLM validation completed in %.3f seconds", (llm_validation_end - llm_validation_start).total_seconds())
-        
+
         # Process each sentence
         sentence_processing_start = datetime.now()
         logger.info("🔄 Starting sentence processing phase...")
         sentence_scores = []
         total_tokens = 0
-        
+
         for sentence_data in sentences_data:
-            sentence_start = datetime.now()
             index = sentence_data['index']
             text = sentence_data['text']
             tokens = sentence_data['tokens']
-            
+
             logger.debug("Processing sentence %d with %d tokens", index, len(tokens))
-            
+
             # Compute scores for each token in this sentence
-            token_scoring_start = datetime.now()
             scored_tokens = []
-            
+
             for token_info in tokens:
                 token_pos = token_info.get('pos', 'unknown')
-                
+
                 # Skip punctuation tokens entirely
                 if token_pos == 'PUNCT':
                     logger.debug("Skipping punctuation token: '%s' [POS:%s]", token_info['text'], token_pos)
                     continue
-                
+
                 token_scores = self.compute_token_scores(token_info, learning_language, native_language, cognate_validation_results, pre_llm_candidates=pre_llm_candidates)
                 scored_tokens.append(token_scores)
-            
-            token_scoring_end = datetime.now()
-            
+
             # Create sentence score object
             sentence_score = {
                 'text': text,
@@ -829,17 +835,15 @@ class FamiliarityScorer:
                 'tokens': scored_tokens
             }
             sentence_scores.append(sentence_score)
-            
+
             total_tokens += len(scored_tokens)  # Count only processed tokens (non-punctuation)
-            
-            sentence_end = datetime.now()
-        
+
         sentence_processing_end = datetime.now()
         logger.info("✅ Sentence processing completed in %.3f seconds", (sentence_processing_end - sentence_processing_start).total_seconds())
-        
-        logger.info("Document scoring complete - %d sentences, %d total tokens", 
+
+        logger.info("Document scoring complete - %d sentences, %d total tokens",
                    len(sentences_data), total_tokens)
-        
+
         # Prepare response
         result_preparation_start = datetime.now()
         logger.info("📦 Preparing final response...")
@@ -852,18 +856,18 @@ class FamiliarityScorer:
             'total_tokens': total_tokens
         }
         result_preparation_end = datetime.now()
-        
+
         logger.info("✅ Response preparation completed in %.3f seconds", (result_preparation_end - result_preparation_start).total_seconds())
-        
+
         # Log total post-LLM processing time
         total_post_llm_time = (result_preparation_end - llm_validation_end).total_seconds()
         logger.info("🏁 Total post-LLM processing time: %.3f seconds", total_post_llm_time)
-        
+
         # Log total document processing time
         document_end = datetime.now()
         total_document_time = (document_end - document_start).total_seconds()
         logger.info("📊 TOTAL DOCUMENT PROCESSING TIME: %.3f seconds", total_document_time)
-        
+
         return result
 
 # Global scorer instance

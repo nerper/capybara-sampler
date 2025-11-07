@@ -15,7 +15,7 @@ API_VERSION = "1.0.0"
 
 # Cognates configuration
 COGNET_PATH = "cognates/CogNet-top6.tsv"
-TOP_LANGS = ["eng", "spa", "fra", "ita", "por", "deu"]  # English, Spanish, French, Italian, Portuguese, German
+TOP_LANGS = ["eng", "spa", "fra", "ita", "deu"]  # English, Spanish, French, Italian, German
 COGNATE_BATCH_SIZE = 30  # Maximum cognate pairs per OpenAI API request
 
 # OpenAI configuration
@@ -29,14 +29,9 @@ Important considerations:
 For each pair, respond with only "true" or "false" (no field names, explanations, or additional text to save tokens)."""
 
 # Language codes
-# SUPPORTED_LANGUAGES = {
-#     "eng": "English",
-#     "ita": "Italian", 
-# }
-
 SUPPORTED_LANGUAGES = {
     "eng": "English",
-    "ita": "Italian", 
+    "ita": "Italian",
     "spa": "Spanish",
     "fra": "French",
     "deu": "German",
