@@ -3,6 +3,7 @@ FastAPI application for word familiarity scoring.
 """
 
 import logging
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
@@ -57,7 +58,7 @@ class FamiliarityResponse(BaseModel):
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Lifespan event handler for startup and shutdown."""
     # Startup
     logger.info("Starting API - preloading datasets and models...")
@@ -96,7 +97,7 @@ app = FastAPI(
 
 
 @app.get("/")
-async def root():
+async def root() -> dict:
     """Root endpoint with API information."""
     return {
         "message": "Word Familiarity API",
@@ -111,13 +112,13 @@ async def root():
 
 
 @app.get("/health")
-async def health_check():
+async def health_check() -> dict:
     """Health check endpoint."""
     return {"status": "healthy"}
 
 
 @app.post("/familiarity", response_model=FamiliarityResponse)
-async def compute_familiarity(request: FamiliarityRequest):
+async def compute_familiarity(request: FamiliarityRequest) -> FamiliarityResponse:
     """
     Compute familiarity scores for all tokens in the content.
 
@@ -188,7 +189,7 @@ async def compute_familiarity(request: FamiliarityRequest):
 
 
 @app.get("/languages")
-async def get_supported_languages():
+async def get_supported_languages() -> dict:
     """Get list of supported languages."""
     return {
         "supported_languages": SUPPORTED_LANGUAGES

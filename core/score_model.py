@@ -37,13 +37,13 @@ logger = logging.getLogger(__name__)
 class FamiliarityScorer:
     """Computes familiarity scores for tokens using frequency and cognate data."""
 
-    def __init__(self):
-        self.cognates_df = None
-        self.filtered_cognates_df = None
-        self.openai_client = None
+    def __init__(self) -> None:
+        self.cognates_df: pl.DataFrame | None = None
+        self.filtered_cognates_df: pl.DataFrame | None = None
+        self.openai_client: OpenAI | None = None
         self._init_openai_client()
 
-    def _init_openai_client(self):
+    def _init_openai_client(self) -> None:
         """Initialize OpenAI client if API key is available."""
         api_key = os.getenv('OPENAI_API_KEY')
         if api_key:
@@ -134,7 +134,7 @@ class FamiliarityScorer:
             group_counter = 1
 
             # We need to organize this batch by groups for the prompt
-            batch_by_groups = {}
+            batch_by_groups: dict[tuple[str, str, str], list[tuple]] = {}
             for candidate in cognate_batch:
                 search_word = candidate[0]
                 learning_lang = candidate[1]
@@ -169,6 +169,9 @@ class FamiliarityScorer:
                 group_counter += 1
 
             user_prompt = '\n'.join(group_prompts)
+
+            if self.openai_client is None:
+                raise ValueError("OpenAI client not initialized. Please set OPENAI_API_KEY environment variable.")
 
             response = self.openai_client.chat.completions.create(
                 model=OPENAI_MODEL,
@@ -278,7 +281,7 @@ class FamiliarityScorer:
             logger.error("Grouped batch %d validation failed: %s", batch_idx, str(e))
             raise RuntimeError(f"LLM batch validation failed: {str(e)}") from e
 
-    def load_cognates_dataset(self):
+    def load_cognates_dataset(self) -> None:
         """Load and filter the cognates dataset for the top languages."""
         try:
             logger.info("Loading cognates dataset from %s", COGNET_PATH)
@@ -383,9 +386,9 @@ class FamiliarityScorer:
         cognate_results = {}
         search_items = list(unique_search_requests.items())
 
-        def search_single_cognate(item):
+        def search_single_cognate(item: tuple[tuple[str, str, str], tuple[str, str, str]]) -> tuple:
             """Search cognates for a single search request."""
-            search_key, (search_word, stanza_pos, sentence_context) = item
+            search_key, (search_word, _, _) = item
             try:
                 search_start = datetime.now()
                 cognates = self.find_cognates(search_word, learning_language, native_language)
@@ -610,7 +613,7 @@ class FamiliarityScorer:
                 cognate_after_LLM = candidate_cognate
 
                 # Calculate Jaro-Winkler similarity between search word and cognate
-                cognate_similarity = jellyfish.jaro_winkler(search_word, candidate_cognate)
+                cognate_similarity = jellyfish.jaro_winkler_similarity(search_word, candidate_cognate)
 
                 # Modulate cognate boost based on similarity (0 = MIN_COGNATE_BOOST, 1 = MAX_COGNATE_BOOST)
                 cognate_boost = MIN_COGNATE_BOOST + (cognate_similarity * (MAX_COGNATE_BOOST - MIN_COGNATE_BOOST))
@@ -708,7 +711,7 @@ class FamiliarityScorer:
         logger.info("✅ Concurrent cognate search completed in %.3f seconds", (cognate_search_end - cognate_search_start).total_seconds())
 
         # Process search results to build cognate groups
-        cognate_groups = {}  # Dict[search_word_key, Set[cognate_candidates]]
+        cognate_groups: dict[tuple, set] = {}  # Dict[search_word_key, Set[cognate_candidates]]
         cognate_contexts = {}  # Dict[search_word_key, sentence_context]
 
         for search_key, (search_word, stanza_pos, sentence_context) in unique_search_requests.items():
@@ -757,7 +760,7 @@ class FamiliarityScorer:
                     cognate_groups[search_key].add(cognate_candidate)
 
         # Convert sets to lists and add actual sentence context for LLM validation
-        final_cognate_groups = {}
+        final_cognate_groups: dict[tuple, list] = {}
         for search_key, unique_candidates in cognate_groups.items():
             # Only include groups that have candidates after POS filtering
             if len(unique_candidates) > 0:

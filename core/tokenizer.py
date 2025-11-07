@@ -3,8 +3,9 @@ Stanza-based tokenizer for processing text in various languages.
 """
 
 import logging
+from typing import Any
 
-import stanza
+import stanza  # type: ignore
 
 from .constants import SUPPORTED_LANGUAGES
 
@@ -24,10 +25,10 @@ ISO_TO_STANZA_MAPPING = {
 class StanzaTokenizer:
     """Tokenizer using Stanza for multilingual text processing."""
 
-    def __init__(self):
-        self._pipelines = {}
+    def __init__(self) -> None:
+        self._pipelines: dict[str, Any] = {}
 
-    def preload_all_pipelines(self):
+    def preload_all_pipelines(self) -> None:
         """Preload all Stanza pipelines for supported languages."""
         logger.info("Preloading all Stanza pipelines...")
 
