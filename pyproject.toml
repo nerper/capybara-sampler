@@ -15,7 +15,7 @@ wordfreq = "^3.0.3"
 pydantic = "^2.5.0"
 polars = "^0.20.0"
 openai = "^1.0.0"
-jellyfish = "^0.11.0"
+jellyfish = "^1.2.0"
 python-dotenv = "^1.0.0"
 
 [tool.poetry.group.dev.dependencies]
