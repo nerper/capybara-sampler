@@ -13,6 +13,7 @@ from difflib import SequenceMatcher
 import jellyfish
 import polars as pl
 import wordfreq
+from dotenv import load_dotenv
 from openai import OpenAI
 
 from .constants import (
@@ -26,6 +27,9 @@ from .constants import (
     TOP_LANGS,
 )
 from .tokenizer import ISO_TO_STANZA_MAPPING, tokenizer
+
+# Load environment variables from .env file FIRST before any OpenAI client initialization
+load_dotenv(override=True)
 
 logger = logging.getLogger(__name__)
 

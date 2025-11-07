@@ -5,16 +5,12 @@ FastAPI application for word familiarity scoring.
 import logging
 from contextlib import asynccontextmanager
 
-from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
 from core.constants import API_VERSION, SUPPORTED_LANGUAGES
 from core.score_model import familiarity_scorer
 from core.tokenizer import tokenizer
-
-# Load environment variables from .env file FIRST
-load_dotenv(override=True)
 
 # Configure logging
 logging.basicConfig(
