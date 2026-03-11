@@ -76,16 +76,22 @@ class FamiliarityResponse(BaseModel):
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Lifespan event handler for startup and shutdown."""
-    # Startup
-    logger.info("Starting API - preloading datasets and models...")
+    import os
 
-    # Preload all Stanza pipelines
-    try:
-        tokenizer.preload_all_pipelines()
-        logger.info("Successfully preloaded all Stanza pipelines")
-    except Exception as e:
-        logger.error("Failed to preload Stanza pipelines: %s", str(e))
-        raise RuntimeError(f"Startup failed: Could not preload Stanza pipelines - {str(e)}") from e
+    logger.info("Starting API - loading datasets...")
+
+    # Stanza: lazy-load by default to stay under 4GB RAM. Set PRELOAD_LANGUAGES=spa,eng to
+    # preload specific languages (useful on 8GB+ instances for faster first requests).
+    preload_langs = os.getenv("PRELOAD_LANGUAGES", "").strip()
+    if preload_langs:
+        langs = [x.strip().lower() for x in preload_langs.split(",") if x.strip()]
+        if langs:
+            try:
+                tokenizer.preload_pipelines(langs)
+                logger.info("Preloaded Stanza pipelines for: %s", langs)
+            except Exception as e:
+                logger.error("Failed to preload Stanza pipelines: %s", str(e))
+                raise RuntimeError(f"Startup failed: {str(e)}") from e
 
     # Load cognates dataset (optional - run `git lfs pull` if file is LFS pointer)
     try:

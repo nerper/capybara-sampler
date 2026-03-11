@@ -30,11 +30,16 @@ class StanzaTokenizer:
 
     def preload_all_pipelines(self) -> None:
         """Preload all Stanza pipelines for supported languages."""
-        logger.info("Preloading all Stanza pipelines...")
+        self.preload_pipelines(list(SUPPORTED_LANGUAGES.keys()))
 
-        for iso_code, stanza_code in ISO_TO_STANZA_MAPPING.items():
+    def preload_pipelines(self, languages: list[str]) -> None:
+        """Preload Stanza pipelines for the given language codes (e.g. ['spa', 'eng'])."""
+        logger.info("Preloading Stanza pipelines for %s...", languages)
+
+        for iso_code in languages:
             if iso_code in SUPPORTED_LANGUAGES:
                 try:
+                    stanza_code = ISO_TO_STANZA_MAPPING.get(iso_code, iso_code)
                     logger.info("Preloading Stanza pipeline for %s (%s)", iso_code, stanza_code)
                     self._get_pipeline(iso_code)
                 except Exception as e:

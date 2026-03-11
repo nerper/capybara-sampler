@@ -74,8 +74,9 @@ In the **Environment** section, add:
 |-----|-------|---------|
 | `PORT` | `8080` | No (Render sets this automatically, but your app reads it) |
 | `OPENAI_API_KEY` | `sk-your-actual-key` | **Yes** ✓ |
+| `PRELOAD_LANGUAGES` | *(optional)* `spa,eng` | No — Only on 8 GB+ instances |
 
-Render sets `PORT` automatically — your `main.py` already reads it. You can omit `PORT` if you prefer; the default is 8080.
+Render sets `PORT` automatically — your `main.py` already reads it. You can omit `PORT` if you prefer; the default is 8080. Leave `PRELOAD_LANGUAGES` unset on 4 GB instances (Stanza lazy-loads on first request).
 
 ---
 
@@ -144,8 +145,9 @@ Then create the service via **Blueprint** (New + → Blueprint) and point it at 
 - Render supports Poetry natively for Python runtime
 
 ### Out of memory / OOM killed
-- Upgrade to **Pro** (4 GB) or **Pro Plus** (8 GB)
-- Stanza loads multiple language models at startup
+- **Default fix:** Stanza pipelines are now lazy-loaded (no preload at startup). This keeps memory under 4 GB.
+- If you still OOM: upgrade to **Pro Plus** (8 GB)
+- Optional: set `PRELOAD_LANGUAGES=spa,eng` to preload specific languages at startup (only on 8 GB+ instances)
 
 ### Slow first request
 - Render may spin down free/low-tier instances after inactivity
