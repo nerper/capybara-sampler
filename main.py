@@ -2,9 +2,25 @@
 FastAPI application for word familiarity scoring.
 """
 
+from __future__ import annotations
+
+# Fix PyTorch 2.6+ weights_only for Stanza model loading (must run before stanza import)
+import torch
+
+_original_torch_load = torch.load
+
+
+def _patched_torch_load(*args, **kwargs):
+    kwargs.setdefault("weights_only", False)
+    return _original_torch_load(*args, **kwargs)
+
+
+torch.load = _patched_torch_load
+
 import logging
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
+from typing import Optional
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
@@ -32,11 +48,11 @@ class TokenScore(BaseModel):
     """Model for individual token scores."""
     text: str = Field(..., description="The token text")
     familiarity_score: float = Field(..., description="Familiarity score (0-1) based on word frequency")
-    cognate_boosted_familiarity_score: float | None = Field(None, description="Familiarity score with cognate boost applied, null if no cognate found")
-    cognate_before_LLM: str | None = Field(None, description="The cognate word found in dataset before LLM validation")
-    cognate_after_LLM: str | None = Field(None, description="The cognate word in native language after LLM validation (null if rejected by LLM)")
-    cognate_similarity: float | None = Field(None, description="Jaro-Winkler similarity score between search word and cognate (0-1), null if no cognate found")
-    entity: str | None = Field(None, description="Named entity type (PER, LOC, ORG, etc.) if token is part of a named entity, null otherwise")
+    cognate_boosted_familiarity_score: Optional[float] = Field(None, description="Familiarity score with cognate boost applied, null if no cognate found")
+    cognate_before_LLM: Optional[str] = Field(None, description="The cognate word found in dataset before LLM validation")
+    cognate_after_LLM: Optional[str] = Field(None, description="The cognate word in native language after LLM validation (null if rejected by LLM)")
+    cognate_similarity: Optional[float] = Field(None, description="Jaro-Winkler similarity score between search word and cognate (0-1), null if no cognate found")
+    entity: Optional[str] = Field(None, description="Named entity type (PER, LOC, ORG, etc.) if token is part of a named entity, null otherwise")
 
 
 class SentenceScore(BaseModel):
@@ -71,13 +87,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         logger.error("Failed to preload Stanza pipelines: %s", str(e))
         raise RuntimeError(f"Startup failed: Could not preload Stanza pipelines - {str(e)}") from e
 
-    # Load cognates dataset
+    # Load cognates dataset (optional - run `git lfs pull` if file is LFS pointer)
     try:
         familiarity_scorer.load_cognates_dataset()
         logger.info("Successfully loaded cognates dataset")
     except Exception as e:
-        logger.error("Failed to load cognates dataset: %s", str(e))
-        raise RuntimeError(f"Startup failed: Could not load cognates dataset - {str(e)}") from e
+        logger.warning("Cognates dataset not loaded (cognate boosting disabled): %s", str(e))
 
     logger.info("API startup complete - all models preloaded")
 
@@ -205,21 +220,23 @@ if __name__ == "__main__":
     dev_mode = os.getenv('DEV_MODE', 'false').lower() == 'true'
 
     if dev_mode:
+        port = int(os.getenv("PORT", "8000"))
         logger.info("Starting uvicorn server in DEVELOPMENT mode with hot reload")
         uvicorn.run(
             "main:app",
             host="0.0.0.0",
-            port=8000,
+            port=port,
             reload=True,
             # More targeted reload settings to avoid performance issues
             reload_dirs=[".", "core"],
             reload_delay=0.25
         )
     else:
+        port = int(os.getenv("PORT", "8080"))
         logger.info("Starting uvicorn server in PRODUCTION mode (no reload)")
         uvicorn.run(
             "main:app",
             host="0.0.0.0",
-            port=7000,
+            port=port,
             reload=False
         )

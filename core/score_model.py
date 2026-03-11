@@ -2,11 +2,14 @@
 Core scoring model for computing familiarity scores based on word frequency.
 """
 
+from __future__ import annotations
+
 import concurrent.futures
 import json
 import logging
 import os
 from concurrent.futures import ThreadPoolExecutor
+from typing import Optional
 from datetime import datetime
 from difflib import SequenceMatcher
 
@@ -505,7 +508,7 @@ class FamiliarityScorer:
         logger.debug("Word '%s' (%s): zipf=%.3f, normalized=%.3f", word, wordfreq_lang, zipf_score, normalized)
         return normalized, zipf_score
 
-    def compute_token_scores(self, token_info: dict, learning_lang: str, native_lang: str, cognate_validation_results: dict | None = None, pre_llm_candidates: dict | None = None) -> dict:
+    def compute_token_scores(self, token_info: dict, learning_lang: str, native_lang: str, cognate_validation_results: Optional[dict] = None, pre_llm_candidates: Optional[dict] = None) -> dict:
         """
         Compute familiarity scores for a single token.
 
