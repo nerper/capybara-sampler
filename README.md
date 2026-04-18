@@ -37,6 +37,10 @@ Steps:
 
 Stanza models will download automatically on first startup (may take 30-60 seconds).
 
+## Docker (private registry)
+
+See **[DOCKER.md](DOCKER.md)** for building the image, pushing to a **private Docker Hub** repository, and the image URL + credential fields for “Existing image” deploys.
+
 ## Usage
 
 Start the server:

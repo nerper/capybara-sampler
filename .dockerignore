@@ -1,0 +1,34 @@
+# Git / IDE
+.git
+.gitattributes
+.cursor
+.DS_Store
+
+# Python
+__pycache__
+*.py[cod]
+*$py.class
+.Python
+.venv
+venv
+.env
+.env.*
+
+# Tests & tooling
+.pytest_cache
+.mypy_cache
+.ruff_cache
+tests.py
+pytest.ini
+
+# Docs (not needed at runtime)
+*.md
+API_GUIDE.md
+DOCUMENTATION.md
+EC2_DEPLOYMENT_GUIDE.md
+HOSTINGER_VPS_GUIDE.md
+RENDER_DEPLOYMENT_GUIDE.md
+
+# Misc
+package-lock.json
+run.sh
