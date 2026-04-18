@@ -23,6 +23,7 @@ from contextlib import asynccontextmanager
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from core.constants import API_VERSION, SUPPORTED_LANGUAGES
@@ -114,6 +115,21 @@ app = FastAPI(
     version=API_VERSION,
     description="Computes per-token familiarity scores for phrases in target languages based on word frequency",
     lifespan=lifespan
+)
+
+# Browser clients (SPA dev + deployed frontends) require CORS; Postman/curl do not.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:5173",
+        "http://localhost:5174",
+        "http://localhost:5175",
+        "http://mediumseagreen-rail-433210.hostingersite.com",
+        "https://mediumseagreen-rail-433210.hostingersite.com",
+    ],
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization"],
 )
 
 

@@ -109,6 +109,10 @@ poetry run python tests.py
 
 Scoring parameters can be adjusted in `core/constants.py`. To add new languages, update `SUPPORTED_LANGUAGES` and ensure Stanza models are available.
 
+### CORS
+
+Browser-based apps (e.g. Vite on `http://localhost:5173` or a static site on Hostinger) need **CORS** headers on this API. `main.py` registers `CORSMiddleware` with explicit `allow_origins`. If your frontend is served from another URL, add that origin to `allow_origins` and redeploy.
+
 ## How it Works
 
 The API uses:

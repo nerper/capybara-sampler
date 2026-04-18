@@ -78,6 +78,12 @@ In the **Environment** section, add:
 
 Render sets `PORT` automatically — your `main.py` already reads it. You can omit `PORT` if you prefer; the default is 8080. Leave `PRELOAD_LANGUAGES` unset on 4 GB instances (Stanza lazy-loads on first request).
 
+### CORS (browser clients)
+
+The API enables **CORS** so JavaScript in the browser can call it from allowed origins. Allowed origins are configured in `main.py` (currently includes local Vite dev and the Hostinger interactive player site). Browsers send an **OPTIONS** preflight for cross-origin `POST /familiarity`; the service must respond with `Access-Control-Allow-Origin` for that origin — Postman and `curl` do not enforce CORS.
+
+To add another production frontend origin, update the `allow_origins` list in `main.py` and redeploy.
+
 ---
 
 ## Step 6: Deploy
