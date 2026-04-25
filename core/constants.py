@@ -11,7 +11,7 @@ MIN_ZIPF = 2.3
 MAX_ZIPF = 7.7
 
 # API configuration
-API_VERSION = "1.0.0"
+API_VERSION = "1.0.1"
 
 # Cognates configuration
 COGNET_PATH = "cognates/CogNet-top6.tsv"

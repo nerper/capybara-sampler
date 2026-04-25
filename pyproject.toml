@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "ella-word-familiarity"
-version = "0.1.0"
+version = "0.1.1"
 description = "FastAPI project for computing per-token familiarity scores with cognate boosting"
 authors = ["Péricles Serotini <p.serotini@gmail.com>"]
 readme = "README.md"
