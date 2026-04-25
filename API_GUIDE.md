@@ -17,6 +17,60 @@ Quick reference for calling the Word Familiarity API.
 
 ---
 
+## Supported languages
+
+The API uses **canonical ISO 639-3** three-letter codes internally and in responses. For requests you may send either those codes or **locale aliases** (BCP-47–style tags such as `en-US`, `pt-BR`, `zh-Hans`); they are normalized before scoring.
+
+### Canonical codes (use in `learning_language` / `native_language`)
+
+| Code | Language |
+|------|----------|
+| `eng` | English |
+| `ita` | Italian |
+| `spa` | Spanish |
+| `fra` | French |
+| `deu` | German |
+| `por` | Portuguese |
+| `nld` | Dutch |
+| `pol` | Polish |
+| `rus` | Russian |
+| `jpn` | Japanese |
+| `kor` | Korean |
+| `cmn` | Mandarin (Simplified) |
+| `arb` | Arabic |
+| `heb` | Hebrew |
+
+### How to connect
+
+1. **Discover codes at runtime** (recommended so your client stays in sync with the server):
+
+   ```bash
+   curl https://YOUR_HOST/languages
+   ```
+
+   The JSON includes:
+
+   - `supported_languages` — map of canonical code → human-readable name (authoritative list).
+   - `locale_aliases` — map of accepted request strings (lowercase, hyphenated) → canonical code, e.g. `en-us` → `eng`, `zh-hans` → `cmn`.
+
+   The same payload is also returned on `GET /` under `supported_languages` and `locale_aliases`.
+
+2. **Score text** — send a JSON body to `POST /familiarity` with:
+
+   - `learning_language` — language of the **content** being analyzed (the learner’s target language).
+   - `native_language` — the learner’s **L1** (used for cognate detection relative to that language).
+   - `content` — non-empty string in the learning language.
+
+   Use canonical codes or any key from `locale_aliases` for both language fields.
+
+3. **Browser / SPA** — same URLs; ensure your deployment’s CORS settings allow your origin (see `main.py` for allowed origins in this repo).
+
+4. **Interactive testing** — with the server running, open `/docs` (Swagger) or `/redoc` and try `POST /familiarity` with the fields above.
+
+If a language string is not in `supported_languages` and does not match an alias, the API returns **400** with the list of supported canonical codes.
+
+---
+
 ## GET `/`
 
 Returns API metadata.
