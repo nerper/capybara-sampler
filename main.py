@@ -24,9 +24,10 @@ from typing import Optional
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from core.constants import API_VERSION, SUPPORTED_LANGUAGES
+from core.language_codes import alias_map_for_api, normalize_language_request
 from core.score_model import familiarity_scorer
 from core.tokenizer import tokenizer
 
@@ -40,9 +41,20 @@ logger = logging.getLogger(__name__)
 
 class FamiliarityRequest(BaseModel):
     """Request model for familiarity scoring."""
-    learning_language: str = Field(..., description="Target language code (e.g., 'spa', 'ita', 'fra', 'eng')")
-    native_language: str = Field(..., description="Native language code (e.g., 'spa', 'ita', 'fra', 'eng')")
+    learning_language: str = Field(
+        ...,
+        description="Target language: canonical ISO 639-3 (e.g. spa, jpn) or locale alias (e.g. es-US, zh-Hans)",
+    )
+    native_language: str = Field(
+        ...,
+        description="User language: canonical ISO 639-3 or locale alias (see GET /languages locale_aliases)",
+    )
     content: str = Field(..., description="The text content to analyze for familiarity")
+
+    @field_validator("learning_language", "native_language", mode="before")
+    @classmethod
+    def _normalize_language_codes(cls, v: object) -> str:
+        return normalize_language_request(str(v))
 
 
 class TokenScore(BaseModel):
@@ -85,7 +97,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # preload specific languages (useful on 8GB+ instances for faster first requests).
     preload_langs = os.getenv("PRELOAD_LANGUAGES", "").strip()
     if preload_langs:
-        langs = [x.strip().lower() for x in preload_langs.split(",") if x.strip()]
+        langs = [
+            normalize_language_request(x.strip())
+            for x in preload_langs.split(",")
+            if x.strip()
+        ]
         if langs:
             try:
                 tokenizer.preload_pipelines(langs)
@@ -140,6 +156,7 @@ async def root() -> dict:
         "message": "Word Familiarity API",
         "version": API_VERSION,
         "supported_languages": SUPPORTED_LANGUAGES,
+        "locale_aliases": alias_map_for_api(),
         "endpoints": {
             "familiarity": "/familiarity (POST) - Analyze content familiarity scores",
             "languages": "/languages (GET)",
@@ -229,7 +246,8 @@ async def compute_familiarity(request: FamiliarityRequest) -> FamiliarityRespons
 async def get_supported_languages() -> dict:
     """Get list of supported languages."""
     return {
-        "supported_languages": SUPPORTED_LANGUAGES
+        "supported_languages": SUPPORTED_LANGUAGES,
+        "locale_aliases": alias_map_for_api(),
     }
 
 

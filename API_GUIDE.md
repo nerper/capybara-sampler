@@ -26,25 +26,7 @@ Returns API metadata.
 curl http://localhost:8080/
 ```
 
-**Response:**
-```json
-{
-  "message": "Word Familiarity API",
-  "version": "1.0.0",
-  "supported_languages": {
-    "eng": "English",
-    "ita": "Italian",
-    "spa": "Spanish",
-    "fra": "French",
-    "deu": "German"
-  },
-  "endpoints": {
-    "familiarity": "/familiarity (POST) - Analyze content familiarity scores",
-    "languages": "/languages (GET)",
-    "health": "/health (GET)"
-  }
-}
-```
+**Response:** includes `supported_languages` (canonical ISO 639-3 → display name), `locale_aliases` (request tokens such as `en-US`, `pt-BR`, `zh-Hans` → canonical code), and `endpoints`. Exact keys match the live server; use `curl` against your deployment to inspect the full map.
 
 ---
 
@@ -73,18 +55,7 @@ Returns supported language codes and names.
 curl http://localhost:8080/languages
 ```
 
-**Response:**
-```json
-{
-  "supported_languages": {
-    "eng": "English",
-    "ita": "Italian",
-    "spa": "Spanish",
-    "fra": "French",
-    "deu": "German"
-  }
-}
-```
+**Response:** `supported_languages` and `locale_aliases` (see GET `/`).
 
 ---
 
@@ -96,8 +67,8 @@ Analyzes text and returns per-token familiarity scores.
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `learning_language` | string | Yes | Target language code: `eng`, `spa`, `ita`, `fra`, `deu` |
-| `native_language` | string | Yes | User's native language code |
+| `learning_language` | string | Yes | Canonical code (e.g. `eng`, `jpn`, `cmn`) or locale alias from `locale_aliases` (e.g. `en-US`, `pt-BR`, `zh-Hans`) |
+| `native_language` | string | Yes | Same as `learning_language` |
 | `content` | string | Yes | Text to analyze (non-empty) |
 
 ### Example Request
@@ -169,9 +140,11 @@ curl -X POST http://localhost:8080/familiarity \
 **400 Bad Request** — Invalid language or empty content:
 ```json
 {
-  "detail": "Learning language 'xyz' not supported. Supported: ['eng', 'ita', 'spa', 'fra', 'deu']"
+  "detail": "Learning language 'xyz' not supported. Supported: ['arb', 'cmn', 'deu', 'eng', ...]"
 }
 ```
+
+Use `GET /languages` for the authoritative `supported_languages` list.
 
 **500 Internal Server Error** — Processing failure:
 ```json

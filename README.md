@@ -7,19 +7,34 @@ A FastAPI application that computes familiarity scores for individual words in t
 - Token-level analysis with POS tagging and lemmatization using Stanza
 - Frequency-based scoring using the wordfreq library
 - Cognate detection with CogNet dataset and OpenAI validation
-- Support for 5 languages: English, Italian, Spanish, French, German
+- Support for many languages (canonical ISO 639-3 codes plus BCP-47 locale aliases such as `en-US`, `pt-BR`, `zh-Hans`)
 - REST API with automatic documentation
 - All models preloaded at startup for consistent performance
 
 ## Supported Languages
 
-| ISO Code | Language   | Stanza Model |
-|----------|------------|-------------|
-| `eng`    | English    | en          |
-| `ita`    | Italian    | it          |
-| `spa`    | Spanish    | es          |
-| `fra`    | French     | fr          |
-| `deu`    | German     | de          |
+Canonical codes (also returned in API responses after normalization):
+
+| ISO Code | Language | Stanza `lang` |
+|----------|----------|---------------|
+| `eng` | English | `en` |
+| `ita` | Italian | `it` |
+| `spa` | Spanish | `es` |
+| `fra` | French | `fr` |
+| `deu` | German | `de` |
+| `por` | Portuguese | `pt` |
+| `nld` | Dutch | `nl` |
+| `pol` | Polish | `pl` |
+| `rus` | Russian | `ru` |
+| `jpn` | Japanese | `ja` |
+| `kor` | Korean | `ko` |
+| `cmn` | Mandarin (Simplified) | `zh-hans` |
+| `arb` | Arabic | `ar` |
+| `heb` | Hebrew | `he` |
+
+**Locale aliases:** `GET /` and `GET /languages` include a `locale_aliases` object (e.g. `en-US` → `eng`, `es-ES` → `spa`, `pt-BR` → `por`, `zh-Hans` → `cmn`). You may send either canonical codes or these aliases in `learning_language` / `native_language`.
+
+**Frequency notes:** Chinese Zipf scores use **jieba** (bundled dependency). Japanese and Korean `wordfreq` lookups may require optional system packages (e.g. MeCab); if missing, frequency falls back to zero without crashing.
 
 ## Installation
 
@@ -103,11 +118,12 @@ curl -X POST "http://localhost:8000/familiarity" \
 Run tests with:
 ```bash
 poetry run python tests.py
+poetry run pytest tests/test_language_support.py -v
 ```
 
 ## Configuration
 
-Scoring parameters can be adjusted in `core/constants.py`. To add new languages, update `SUPPORTED_LANGUAGES` and ensure Stanza models are available.
+Scoring parameters can be adjusted in `core/constants.py`. To add new languages, update `SUPPORTED_LANGUAGES`, `ISO_TO_STANZA_LANG` / `ISO_TO_WORDFREQ_LANG` / processor overrides in `core/language_codes.py`, and Stanza model availability.
 
 ### CORS
 
@@ -137,8 +153,8 @@ The project is structured as:
 - `core/` - Core logic modules
 - `cognates/` - CogNet dataset
 
-To add new languages, update `SUPPORTED_LANGUAGES` in `core/constants.py`.
+To add new languages, update `SUPPORTED_LANGUAGES` in `core/constants.py` and mappings in `core/language_codes.py`.
 
 ## Dependencies
 
-Key libraries: FastAPI, Stanza, wordfreq, OpenAI, Polars. See `pyproject.toml` for complete list.
+Key libraries: FastAPI, Stanza, wordfreq, jieba (Chinese tokenization for wordfreq), OpenAI, Polars. See `pyproject.toml` for the complete list.

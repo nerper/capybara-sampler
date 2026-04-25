@@ -15,7 +15,22 @@ API_VERSION = "1.0.0"
 
 # Cognates configuration
 COGNET_PATH = "cognates/CogNet-top6.tsv"
-TOP_LANGS = ["eng", "spa", "fra", "ita", "deu"]  # English, Spanish, French, Italian, German
+TOP_LANGS = [
+    "eng",
+    "spa",
+    "fra",
+    "ita",
+    "deu",
+    "por",
+    "nld",
+    "pol",
+    "rus",
+    "jpn",
+    "kor",
+    "cmn",
+    "arb",
+    "heb",
+]  # Subset of CogNet langs used for cognate indexing (must match columns in cognates TSV)
 COGNATE_BATCH_SIZE = 30  # Maximum cognate pairs per OpenAI API request
 
 # OpenAI configuration
@@ -35,4 +50,13 @@ SUPPORTED_LANGUAGES = {
     "spa": "Spanish",
     "fra": "French",
     "deu": "German",
+    "por": "Portuguese",
+    "nld": "Dutch",
+    "pol": "Polish",
+    "rus": "Russian",
+    "jpn": "Japanese",
+    "kor": "Korean",
+    "cmn": "Mandarin (Simplified)",
+    "arb": "Arabic",
+    "heb": "Hebrew",
 }

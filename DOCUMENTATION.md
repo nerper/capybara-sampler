@@ -139,13 +139,26 @@ For each token:
 
 ## Supported Languages
 
-| ISO Code | Language | Stanza Model |
-|----------|----------|--------------|
+Canonical ISO 639-3 codes (see `core/constants.py`):
+
+| ISO Code | Language | Stanza `lang` |
+|----------|----------|---------------|
 | `eng` | English | en |
 | `ita` | Italian | it |
 | `spa` | Spanish | es |
 | `fra` | French | fr |
 | `deu` | German | de |
+| `por` | Portuguese | pt |
+| `nld` | Dutch | nl |
+| `pol` | Polish | pl |
+| `rus` | Russian | ru |
+| `jpn` | Japanese | ja |
+| `kor` | Korean | ko |
+| `cmn` | Mandarin (Simplified) | zh-hans |
+| `arb` | Arabic | ar |
+| `heb` | Hebrew | he |
+
+`GET /languages` returns `supported_languages` plus `locale_aliases` (BCP-47 and short tags mapped to the canonical codes above). Requests accept either form; responses use canonical codes.
 
 ---
 
@@ -166,7 +179,7 @@ For each token:
 
 - **FastAPI** — Web framework
 - **Stanza** — Tokenization, POS, lemma, NER
-- **wordfreq** — Zipf frequency data
+- **wordfreq** — Zipf frequency data (Chinese via **jieba**; some languages need optional tokenizer backends)
 - **Polars** — CogNet dataset handling
 - **OpenAI** — Cognate validation
 - **jellyfish** — Jaro–Winkler similarity

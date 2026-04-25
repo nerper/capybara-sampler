@@ -8,6 +8,7 @@ import concurrent.futures
 import json
 import logging
 import os
+import unicodedata
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 from datetime import datetime
@@ -27,14 +28,31 @@ from .constants import (
     MIN_COGNATE_BOOST,
     MIN_ZIPF,
     OPENAI_MODEL,
+    SUPPORTED_LANGUAGES,
     TOP_LANGS,
 )
-from .tokenizer import ISO_TO_STANZA_MAPPING, tokenizer
+from .language_codes import ISO_TO_WORDFREQ_LANG
+from .tokenizer import tokenizer
 
 # Load environment variables from .env file FIRST before any OpenAI client initialization
 load_dotenv(override=True)
 
 logger = logging.getLogger(__name__)
+
+# Languages where casefold improves Zipf/cognate matching (Latin / Cyrillic scripts).
+_CASEFOLD_LANGUAGES = frozenset(SUPPORTED_LANGUAGES.keys()) - {"arb", "heb", "cmn", "jpn", "kor"}
+
+
+def _normalized_word_form(surface: str, lang: str) -> str:
+    """NFC + optional casefold for frequency and cognate keys."""
+    t = unicodedata.normalize("NFC", surface.strip())
+    if lang in _CASEFOLD_LANGUAGES:
+        return t.casefold()
+    return t
+
+
+def _cognate_strings_equal(a: str, b: str) -> bool:
+    return unicodedata.normalize("NFC", a.strip()) == unicodedata.normalize("NFC", b.strip())
 
 
 class FamiliarityScorer:
@@ -152,16 +170,10 @@ class FamiliarityScorer:
             logger.info("🔍 Processing batch %d: %d search words",
                        batch_idx + 1, len(batch_by_groups))
 
-            # Create language names mapping
-            lang_names = {
-                'eng': 'English', 'spa': 'Spanish', 'fra': 'French',
-                'ita': 'Italian', 'deu': 'German'
-            }
-
             for search_key, group_candidates in batch_by_groups.items():
                 search_word, learning_lang, native_lang = search_key
-                lang1_name = lang_names.get(learning_lang, learning_lang)
-                lang2_name = lang_names.get(native_lang, native_lang)
+                lang1_name = SUPPORTED_LANGUAGES.get(learning_lang, learning_lang)
+                lang2_name = SUPPORTED_LANGUAGES.get(native_lang, native_lang)
 
                 cognate_list = [f'"{candidate[2]}"' for candidate in group_candidates]
                 context = group_candidates[0][4]  # Use first sentence as context
@@ -242,7 +254,7 @@ class FamiliarityScorer:
                         # LLM selected a specific cognate
                         for candidate in group_candidates:
                             candidate_word = candidate[2]  # Extract cognate word from tuple
-                            results[candidate] = (candidate_word == selected_cognate)
+                            results[candidate] = _cognate_strings_equal(candidate_word, selected_cognate)
                         logger.debug("LLM selected '%s' for group %d", selected_cognate, group_idx)
                 else:
                     # Missing group results - default to reject
@@ -315,9 +327,9 @@ class FamiliarityScorer:
         if self.filtered_cognates_df is None:
             return pl.DataFrame()
 
-        word = word.lower()
         learning_language = learning_language.lower()
         native_language = native_language.lower()
+        word = _normalized_word_form(word, learning_language)
 
         cond1 = (
             (self.filtered_cognates_df["lang 1"].str.to_lowercase() == learning_language)
@@ -356,11 +368,9 @@ class FamiliarityScorer:
         Returns:
             Similarity score between 0 and 1 (1 being identical)
         """
-        # Normalize words to lowercase for comparison
-        word1 = word1.lower().strip()
-        word2 = word2.lower().strip()
+        word1 = unicodedata.normalize("NFC", word1.strip())
+        word2 = unicodedata.normalize("NFC", word2.strip())
 
-        # Use SequenceMatcher for similarity scoring
         similarity = SequenceMatcher(None, word1, word2).ratio()
 
         return similarity
@@ -501,9 +511,26 @@ class FamiliarityScorer:
         Returns:
             Tuple of (normalized frequency score, raw zipf score)
         """
-        # Convert 3-letter ISO code to 2-letter for wordfreq
-        wordfreq_lang = ISO_TO_STANZA_MAPPING.get(language, language)
-        zipf_score = wordfreq.zipf_frequency(word, wordfreq_lang)
+        wordfreq_lang = ISO_TO_WORDFREQ_LANG.get(language, language)
+        try:
+            zipf_score = wordfreq.zipf_frequency(word, wordfreq_lang)
+        except (ImportError, ModuleNotFoundError) as e:
+            logger.warning(
+                "wordfreq optional dependency missing for lang=%s (%s): %s",
+                language,
+                wordfreq_lang,
+                e,
+            )
+            zipf_score = 0.0
+        except Exception as e:
+            logger.warning(
+                "wordfreq lookup failed for word=%r lang=%s (%s): %s",
+                word,
+                language,
+                wordfreq_lang,
+                e,
+            )
+            zipf_score = 0.0
         normalized = self.normalize_frequency(zipf_score)
         logger.debug("Word '%s' (%s): zipf=%.3f, normalized=%.3f", word, wordfreq_lang, zipf_score, normalized)
         return normalized, zipf_score
@@ -524,7 +551,7 @@ class FamiliarityScorer:
         """
         token_start = datetime.now()
         original_text = token_info['text']
-        word = original_text.lower()
+        word = _normalized_word_form(original_text, learning_lang)
         stanza_pos = token_info.get('pos')
         entity = token_info.get('entity')
 
@@ -570,7 +597,7 @@ class FamiliarityScorer:
             # Use lemma (base form) for cognate search only for nouns and adjectives, otherwise use the word
             if (stanza_pos == 'NOUN' or stanza_pos == 'ADJ') and token_info.get('lemma'):
                 lemma = token_info.get('lemma')
-                search_word = lemma.lower() if lemma else word
+                search_word = _normalized_word_form(lemma, learning_lang) if lemma else word
                 logger.debug("Using lemma '%s' for %s cognate search (original: '%s')", search_word, stanza_pos.lower(), word)
             else:
                 search_word = word
@@ -615,8 +642,10 @@ class FamiliarityScorer:
                 # cognate_before_LLM is already set above from pre_llm_candidates
                 cognate_after_LLM = candidate_cognate
 
-                # Calculate Jaro-Winkler similarity between search word and cognate
-                cognate_similarity = jellyfish.jaro_winkler_similarity(search_word, candidate_cognate)
+                try:
+                    cognate_similarity = jellyfish.jaro_winkler_similarity(search_word, candidate_cognate)
+                except Exception:
+                    cognate_similarity = 0.0
 
                 # Modulate cognate boost based on similarity (0 = MIN_COGNATE_BOOST, 1 = MAX_COGNATE_BOOST)
                 cognate_boost = MIN_COGNATE_BOOST + (cognate_similarity * (MAX_COGNATE_BOOST - MIN_COGNATE_BOOST))
@@ -694,10 +723,9 @@ class FamiliarityScorer:
                     continue
 
                 if stanza_pos in cognate_eligible_pos and stanza_pos != 'PUNCT':
-                    word = token_info['text'].lower()
-                    # Use lemma (base form) for cognate search only for nouns and adjectives
+                    word = _normalized_word_form(token_info['text'], learning_language)
                     if (stanza_pos == 'NOUN' or stanza_pos == 'ADJ') and token_info.get('lemma'):
-                        search_word = token_info.get('lemma').lower()
+                        search_word = _normalized_word_form(token_info.get('lemma'), learning_language)
                     else:
                         search_word = word
 

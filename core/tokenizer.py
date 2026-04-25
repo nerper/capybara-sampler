@@ -8,18 +8,16 @@ from typing import Any
 import stanza  # type: ignore
 
 from .constants import SUPPORTED_LANGUAGES
+from .language_codes import (
+    DEFAULT_STANZA_PROCESSORS,
+    ISO_TO_STANZA_LANG,
+    STANZA_PROCESSORS_BY_STANZA_LANG,
+)
 
 logger = logging.getLogger(__name__)
 
-
-# Mapping from 3-letter ISO codes to Stanza 2-letter codes
-ISO_TO_STANZA_MAPPING = {
-    "ita": "it",
-    "eng": "en",
-    "spa": "es",
-    "fra": "fr",
-    "deu": "de"
-}
+# Backward-compatible name; maps canonical ISO 639-3 to Stanza `lang=` code.
+ISO_TO_STANZA_MAPPING = ISO_TO_STANZA_LANG
 
 
 class StanzaTokenizer:
@@ -39,7 +37,7 @@ class StanzaTokenizer:
         for iso_code in languages:
             if iso_code in SUPPORTED_LANGUAGES:
                 try:
-                    stanza_code = ISO_TO_STANZA_MAPPING.get(iso_code, iso_code)
+                    stanza_code = ISO_TO_STANZA_LANG.get(iso_code, iso_code)
                     logger.info("Preloading Stanza pipeline for %s (%s)", iso_code, stanza_code)
                     self._get_pipeline(iso_code)
                 except Exception as e:
@@ -50,16 +48,13 @@ class StanzaTokenizer:
 
     def _get_pipeline(self, language: str) -> stanza.Pipeline:
         """Get or create a Stanza pipeline for the specified language."""
-        # Convert 3-letter ISO code to 2-letter Stanza code
-        stanza_lang = ISO_TO_STANZA_MAPPING.get(language, language)
+        stanza_lang = ISO_TO_STANZA_LANG.get(language, language)
+        processors = STANZA_PROCESSORS_BY_STANZA_LANG.get(stanza_lang, DEFAULT_STANZA_PROCESSORS)
 
         if stanza_lang not in self._pipelines:
-            logger.info("Loading Stanza pipeline for language: %s", stanza_lang)
-            # Choose processors once; some langs expect mwt (multi-word tokenizer)
-            processors = 'tokenize,mwt,pos,lemma,ner'
+            logger.info("Loading Stanza pipeline for language: %s (%s)", stanza_lang, processors)
             try:
                 logger.info("Creating new Stanza pipeline for %s", stanza_lang)
-                # Try to load the pipeline, reuse existing resources to avoid rate limiting
                 self._pipelines[stanza_lang] = stanza.Pipeline(
                     lang=stanza_lang,
                     processors=processors,
@@ -69,7 +64,6 @@ class StanzaTokenizer:
                 logger.info("Successfully loaded Stanza pipeline for %s", stanza_lang)
             except FileNotFoundError as e:
                 logger.warning("Stanza model not found for %s, downloading: %s", stanza_lang, e)
-                # If model is not available, download it
                 stanza.download(stanza_lang, verbose=False)
                 self._pipelines[stanza_lang] = stanza.Pipeline(
                     lang=stanza_lang,
@@ -106,10 +100,8 @@ class StanzaTokenizer:
         doc = pipeline(text)  # This returns a stanza.Document
 
         sentences_data = []
-        # doc.sentences is a list of stanza.Sentence objects
         ner_entities = []  # Track named entities for logging
         for sent_idx, sentence in enumerate(doc.sentences):
-            # Create a mapping of token IDs to NER entity types
             token_to_ner = {}
             if hasattr(sentence, 'ents') and sentence.ents:
                 for entity in sentence.ents:
@@ -117,17 +109,14 @@ class StanzaTokenizer:
                     logger.debug("NER entity identified: '%s' (type: %s) in sentence %d",
                                entity.text, entity.type, sent_idx)
 
-                    # Use the entity's tokens property to map tokens to entity type
                     if hasattr(entity, 'tokens'):
                         for token in entity.tokens:
-                            # Map each token ID to the entity type
                             if hasattr(token, 'id') and len(token.id) > 0:
-                                token_id = token.id[0]  # Get the first (and usually only) ID
+                                token_id = token.id[0]
                                 token_to_ner[token_id] = entity.type
 
             tokens = []
             for word in sentence.words:
-                # Get the token ID for this word (1-based in Stanza)
                 word_id = word.id if hasattr(word, 'id') else None
 
                 token_data = {
@@ -147,7 +136,6 @@ class StanzaTokenizer:
         total_tokens = sum(len(sent['tokens']) for sent in sentences_data)
         logger.info("Tokenized document into %d sentences with %d total tokens", len(sentences_data), total_tokens)
 
-        # Log summary of named entities found
         if ner_entities:
             logger.info("Found %d NER entities: %s", len(ner_entities), ', '.join(ner_entities))
         else:

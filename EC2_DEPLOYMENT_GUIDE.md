@@ -159,7 +159,7 @@ print('Stanza pipelines preloaded')
 "
 ```
 
-This may take several minutes. Supported languages: `eng`, `ita`, `spa`, `fra`, `deu`.
+This may take several minutes. Supported canonical codes include `eng`, `ita`, `spa`, `fra`, `deu`, `por`, `nld`, `pol`, `rus`, `jpn`, `kor`, `cmn`, `arb`, `heb` (see `GET /languages` and `locale_aliases` on the running API).
 
 ---
 

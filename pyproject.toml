@@ -13,6 +13,7 @@ fastapi = "^0.104.1"
 uvicorn = {extras = ["standard"], version = "^0.24.0"}
 stanza = "^1.7.0"
 wordfreq = "^3.0.3"
+jieba = "^0.42.1"
 pydantic = "^2.5.0"
 polars = "^0.20.0"
 openai = "^1.0.0"

@@ -5,7 +5,7 @@ Production image runs **FastAPI** with **uvicorn** on port **8080** (override wi
 ## Required runtime configuration
 
 - **`OPENAI_API_KEY`** – required for cognate validation (set in your hosting provider’s env/secrets).
-- Optional: **`PRELOAD_LANGUAGES`** – comma-separated ISO codes (e.g. `spa,eng`) to preload Stanza at startup (uses more RAM).
+- Optional: **`PRELOAD_LANGUAGES`** – comma-separated canonical or alias codes (e.g. `spa,eng`, `en-US,jpn`) to preload Stanza at startup (uses more RAM). Values are normalized the same way as request body language fields.
 
 Do **not** bake `.env` or API keys into the image.
 
